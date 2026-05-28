@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>wasm_zero test (no_std)</title>
+</head>
+<body>
+  <h1>wasm_zero test (no_std)</h1>
+  <pre id="out">loading…</pre>
+  <script type="module">
+    const WASM_URL = '../../target/wasm32-unknown-unknown/debug/wasm_zero_test_nostd.wasm';
+
+    // Stub any wasm-bindgen / env imports so instantiation can succeed
+    // without the wasm-bindgen JS glue.
+    const imports = new Proxy({}, {
+      get: () => new Proxy({}, {
+        get: (_, name) => (...args) => {
+          console.warn(`stub import called: ${String(name)}`, args);
+        },
+      }),
+    });
+
+    const out = document.getElementById('out');
+    try {
+      const { instance } = await WebAssembly.instantiateStreaming(fetch(WASM_URL), imports);
+      const exports = Object.keys(instance.exports).sort();
+      out.textContent =
+        `loaded ${WASM_URL}\n\nexports (${exports.length}):\n` +
+        exports.map(n => `  - ${n}`).join('\n');
+    } catch (err) {
+      out.textContent = `failed to load wasm: ${err}`;
+      console.error(err);
+    }
+  </script>
+</body>
+</html>

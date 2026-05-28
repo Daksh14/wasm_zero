@@ -1,0 +1,8 @@
+[package]
+name = "wasm_zero_build"
+version.workspace = true
+edition.workspace = true
+description = "Build-helper for wasm_zero: scans Rust source for #[wasm_zero] functions and emits matching TypeScript bindings."
+
+[dependencies]
+syn.workspace = true

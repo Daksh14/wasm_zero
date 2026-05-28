@@ -1,0 +1,12 @@
+[package]
+name = "wasm_zero"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wasm_zero_macro.workspace = true
+rkyv.workspace = true
+bytecheck = "0.8.2"
+
+[build-dependencies]
+rkyv-js-codegen = { git = "https://github.com/cometkim/rkyv-js" }

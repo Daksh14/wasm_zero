@@ -1,0 +1,16 @@
+[package]
+name = "wasm_zero_test_nostd"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm_zero.workspace = true
+wasm-bindgen = { version = "0.2", default-features = false }
+dlmalloc = { version = "0.2", features = ["global"] }
+rkyv.workspace = true
+
+[build-dependencies]
+wasm_zero_build.workspace = true

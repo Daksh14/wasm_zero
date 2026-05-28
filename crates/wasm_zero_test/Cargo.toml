@@ -1,0 +1,11 @@
+[package]
+name = "wasm_zero_test"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm_zero.workspace = true
+wasm-bindgen = "0.2"

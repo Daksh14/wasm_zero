@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/wasm_zero",
+    "crates/wasm_zero_macro",
+    "crates/wasm_zero_build",
+    "crates/wasm_zero_serve",
+    "crates/wasm_zero_test",
+    "crates/wasm_zero_test_nostd",
+]
+# The test crates target wasm32-unknown-unknown only — keep them out of the
+# default host build so `cargo build` from the workspace root doesn't try
+# to compile them for the host.
+default-members = [
+    "crates/wasm_zero",
+    "crates/wasm_zero_macro",
+    "crates/wasm_zero_build",
+    "crates/wasm_zero_serve",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+wasm_zero = { path = "crates/wasm_zero", version = "0.1.0" }
+wasm_zero_macro = { path = "crates/wasm_zero_macro", version = "0.1.0" }
+wasm_zero_build = { path = "crates/wasm_zero_build", version = "0.1.0" }
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "pointer_width_32", "bytecheck"] }
