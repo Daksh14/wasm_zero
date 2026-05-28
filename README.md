@@ -97,7 +97,9 @@ primitives, **32-bit relative pointers**, root at the end of the buffer.
 | [`wasm_zero_test`](crates/wasm_zero_test) | A `wasm-bindgen`/`std` comparison crate. |
 
 There's also a standalone [`benchmark/`](benchmark) workspace comparing
-`wasm-bindgen` and `wasm_zero` head-to-head (call overhead + data transfer).
+`wasm-bindgen` and `wasm_zero` head-to-head — call overhead, data transfer, and
+**bundle size** (`benchmark/sizes.sh`: wasm_zero ships ~2× smaller gzipped, with
+no glue runtime baked in).
 
 ## Usage
 

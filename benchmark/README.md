@@ -47,6 +47,37 @@ Open <http://127.0.0.1:8000/benchmark/web/index.html> and click **Run
 benchmarks**. (rkyv-js is loaded from GitHub via esm.sh, so the page needs
 network access the first time.)
 
+## Bundle size
+
+`build.sh` ends with a size report (or run it standalone):
+
+```bash
+./sizes.sh
+```
+
+It reports raw and **gzipped** (over-the-wire) sizes, split into `.wasm` + JS,
+with a per-suite shipped total. Representative output:
+
+| Component | wasm_bindgen (gzip) | wasm_zero (gzip) |
+|-----------|---------------------|------------------|
+| `.wasm` | 9.7 KB | 4.3 KB |
+| JS glue / bindings | 3.1 KB | 1.8 KB |
+| **shipped total** | **12.8 KB** | **6.1 KB** |
+
+So wasm_zero ships ~2× smaller — there's no wasm-bindgen glue runtime baked in.
+
+Caveats (also printed by the script):
+
+- wasm_bindgen ships the `.wasm` plus a **per-module** JS glue file.
+- wasm_zero ships the `.wasm` plus a small `bindings.js`, and shares **one**
+  `rkyv-js` runtime across all modules (loaded once; from a CDN in the demo), so
+  it's excluded from the per-module total. For a single module you'd add the
+  runtime cost once; with many modules wasm_zero pulls further ahead. Measure the
+  runtime with:
+  ```bash
+  curl -s https://esm.sh/gh/cometkim/rkyv-js@2c3fc14 | gzip -9 | wc -c
+  ```
+
 ## Notes
 
 - The wasm-bindgen suite is built with `wasm-pack build --target web` (ES module

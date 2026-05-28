@@ -34,5 +34,8 @@ if command -v wasm-opt >/dev/null; then
   done
 fi
 
+echo ">> sizes:"
+./sizes.sh
+
 echo ">> done. Serve the repo root and open:"
 echo "   http://127.0.0.1:8000/benchmark/web/index.html"
