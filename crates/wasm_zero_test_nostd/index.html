@@ -3,32 +3,70 @@
 <head>
   <meta charset="utf-8" />
   <title>wasm_zero test (no_std)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 48rem; }
+    h1 { font-size: 1.4rem; }
+    .call { margin: 1rem 0; }
+    .name { font-weight: 600; }
+    pre { background: #f4f4f5; padding: 0.75rem 1rem; border-radius: 6px; overflow: auto; }
+    .err { color: #b00020; }
+    .ok { color: #0a7d2c; }
+  </style>
+
+  <!-- Resolve the bare `rkyv-js` specifier the generated bindings import.
+       rkyv-js isn't on npm, so we build it from its GitHub source via esm.sh.
+       Pinned to a commit for reproducibility; use @main for the latest. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "rkyv-js": "https://esm.sh/gh/cometkim/rkyv-js@2c3fc14"
+    }
+  }
+  </script>
 </head>
 <body>
   <h1>wasm_zero test (no_std)</h1>
-  <pre id="out">loading…</pre>
+  <p>Calls the <code>#[wasm_zero]</code> exports and decodes the rkyv payloads with
+     <a href="https://www.npmjs.com/package/rkyv-js">rkyv-js</a> via the generated
+     <code>pkg/bindings.js</code>.</p>
+  <div id="out">loading…</div>
+
   <script type="module">
+    import { initWasmZero } from './pkg/bindings.js';
+
     const WASM_URL = '../../target/wasm32-unknown-unknown/debug/wasm_zero_test_nostd.wasm';
-
-    // Stub any wasm-bindgen / env imports so instantiation can succeed
-    // without the wasm-bindgen JS glue.
-    const imports = new Proxy({}, {
-      get: () => new Proxy({}, {
-        get: (_, name) => (...args) => {
-          console.warn(`stub import called: ${String(name)}`, args);
-        },
-      }),
-    });
-
     const out = document.getElementById('out');
+
+    function show(name, result) {
+      const div = document.createElement('div');
+      div.className = 'call';
+      div.innerHTML =
+        `<div class="name ok">${name}() →</div>` +
+        `<pre>${JSON.stringify(result, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2)}</pre>`;
+      out.appendChild(div);
+    }
+
+    function showError(name, err) {
+      const div = document.createElement('div');
+      div.className = 'call';
+      div.innerHTML = `<div class="name err">${name}() threw: ${err}</div>`;
+      out.appendChild(div);
+      console.error(name, err);
+    }
+
     try {
-      const { instance } = await WebAssembly.instantiateStreaming(fetch(WASM_URL), imports);
-      const exports = Object.keys(instance.exports).sort();
-      out.textContent =
-        `loaded ${WASM_URL}\n\nexports (${exports.length}):\n` +
-        exports.map(n => `  - ${n}`).join('\n');
+      const wasmzero = await initWasmZero(WASM_URL);
+      out.textContent = '';
+
+      for (const name of ['greet', 'get_adult_person']) {
+        try {
+          show(name, wasmzero[name]());
+        } catch (err) {
+          showError(name, err);
+        }
+      }
     } catch (err) {
-      out.textContent = `failed to load wasm: ${err}`;
+      out.innerHTML = `<div class="err">failed to load wasm: ${err}</div>`;
       console.error(err);
     }
   </script>

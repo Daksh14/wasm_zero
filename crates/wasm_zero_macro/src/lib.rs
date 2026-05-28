@@ -18,6 +18,19 @@ pub fn wasm_zero(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ReturnType::Type(_, ty) => ty.clone(),
     };
 
+    // The generated FFI shim takes only the output pointer, so the wrapped
+    // function must be nullary. (Arguments would need their own rkyv-encoded
+    // input buffer, which the current ABI and the generated TS bindings don't
+    // model.)
+    if !original.sig.inputs.is_empty() {
+        return syn::Error::new_spanned(
+            &original.sig.inputs,
+            "wasm_zero only supports functions with no arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+
     let mut shim = original.clone();
     let shim_ident = format_ident!("__wasm_zero_{}", original.sig.ident);
     let original_ident = &original.sig.ident;
@@ -34,7 +47,7 @@ pub fn wasm_zero(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         let bytes = match ::rkyv::to_bytes::<::rkyv::rancor::Error>(&result) {
             Ok(b) => b,
-            Err(_) => return ErrorCode::SerializationError as u32,
+            Err(_) => return ::wasm_zero::ErrorCode::ArchivingError as u32,
         };
 
         let len = bytes.len() as u32;
@@ -53,7 +66,7 @@ pub fn wasm_zero(_attr: TokenStream, item: TokenStream) -> TokenStream {
             );
         }
 
-        ErrorCode::Ok as u32
+        ::wasm_zero::ErrorCode::Ok as u32
     });
 
     let expanded = quote! {

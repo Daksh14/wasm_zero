@@ -1,2 +1,6 @@
 [build]
 target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+# no_std cdylib: abort on panic so we don't need the eh_personality lang item.
+rustflags = ["-C", "panic=abort"]

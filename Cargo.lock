@@ -790,6 +790,7 @@ dependencies = [
 name = "wasm_zero_build"
 version = "0.1.0"
 dependencies = [
+ "quote",
  "syn",
 ]
 

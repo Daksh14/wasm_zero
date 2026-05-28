@@ -21,11 +21,10 @@ export const ArchivedPerson = r.struct({
   email: r.option(r.string),
   scores: r.vec(r.u32),
 });
-export type Person = r.Infer<typeof ArchivedPerson>;
 
 // ---- client ----
-export function bindWasmZero(wasm: any) {
-  function call(shim: string, codec: any) {
+export function bindWasmZero(wasm) {
+  function call(shim, codec) {
     const outPtr = wasm.malloc(4 + MAX_BUFFER_SIZE);
     try {
       const code = wasm[shim](outPtr);
@@ -43,12 +42,12 @@ export function bindWasmZero(wasm: any) {
 
   return {
     wasm,
-    get_adult_person(): Person { return call("__wasm_zero_get_adult_person", ArchivedPerson); },
-    greet(): string { return call("__wasm_zero_greet", r.string); },
+    get_adult_person() { return call("__wasm_zero_get_adult_person", ArchivedPerson); },
+    greet() { return call("__wasm_zero_greet", r.string); },
   };
 }
 
-export async function initWasmZero(wasmUrl: string | URL, imports?: WebAssembly.Imports) {
+export async function initWasmZero(wasmUrl, imports) {
   const importObject =
     imports ?? new Proxy({}, { get: () => new Proxy({}, { get: () => () => {} }) });
   const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), importObject);

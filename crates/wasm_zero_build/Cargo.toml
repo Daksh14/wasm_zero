@@ -6,3 +6,4 @@ description = "Build-helper for wasm_zero: scans Rust source for #[wasm_zero] fu
 
 [dependencies]
 syn.workspace = true
+quote.workspace = true

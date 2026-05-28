@@ -5,105 +5,131 @@
 //!
 //! ```text
 //! wasm_zero_macro   (proc macro)  -> runs inside rustc, emits the FFI shim
-//! wasm_zero_build   (this crate)  -> runs in build.rs, emits the .ts bindings
+//! wasm_zero_build   (this crate)  -> runs in build.rs, emits the JS/TS bindings
 //! ```
 //!
 //! A proc macro can only hand a `TokenStream` back to the compiler — it cannot
 //! write files to the workspace. `build.rs`, on the other hand, runs *before*
-//! rustc and is free to read source files and write artifacts. So the
-//! TypeScript bindings that mirror each `#[wasm_zero]` function are produced
-//! here.
+//! rustc and is free to read source files and write artifacts.
 //!
-//! Typical usage from a consumer crate's `build.rs`:
+//! This helper scans a source file for rkyv structs and `#[wasm_zero]`
+//! functions and emits bindings that target the [`rkyv-js`] runtime: it
+//! generates the `r.struct({...})` codecs (matching rkyv-js-codegen
+//! conventions) plus the wasm_zero FFI client that calls the exported shims and
+//! decodes their rkyv payloads.
+//!
+//! From a consumer crate's `build.rs`:
 //!
 //! ```no_run
 //! fn main() {
-//!     wasm_zero_build::generate("src/lib.rs", "pkg/bindings.ts");
+//!     // Writes <out_dir>/bindings.ts and <out_dir>/bindings.js
+//!     wasm_zero_build::generate("src/lib.rs", "pkg");
 //! }
 //! ```
 //!
-//! This is the same split `prost` / `prost-build`, `uniffi`, and
-//! `wasm-bindgen` use: the macro transforms code at compile time, the build
-//! helper generates the sidecar artifact.
+//! ```js
+//! import { initWasmZero } from "./pkg/bindings.js";
+//! const wasmzero = await initWasmZero("app.wasm");
+//! const person = wasmzero.get_adult_person(); // decoded via rkyv-js
+//! ```
+//!
+//! Two files are emitted from one model:
+//! - `bindings.ts` — idiomatic rkyv-js output with `r.Infer<>` types, for
+//!   bundler/TypeScript consumers.
+//! - `bindings.js` — the same module with types stripped, importable directly
+//!   in a browser (resolve `rkyv-js` via an importmap).
+//!
+//! [`rkyv-js`]: https://www.npmjs.com/package/rkyv-js
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use syn::{Item, ItemFn, ItemStruct, ReturnType, Type};
+use quote::ToTokens;
+use syn::{Fields, Item, ItemFn, ItemStruct, ReturnType, Type};
 
-/// The runtime module the generated bindings import their helpers from.
-///
-/// The emitted `.ts` assumes a hand-written (or separately generated) runtime
-/// that exposes the loaded wasm instance plus the marshalling helpers. Adjust
-/// the import in the generated file if your runtime lives elsewhere.
-const RUNTIME_MODULE: &str = "./runtime";
+/// A named rkyv struct and its fields, in declaration order.
+type StructDef = (String, Vec<(String, Type)>);
 
-/// Scan `src` for `#[wasm_zero]` functions and write the TypeScript bindings to
-/// `out`, creating parent directories as needed.
+/// The result of [`generate_bindings`]: the two files to write.
+pub struct Generated {
+    /// Contents of `bindings.ts` — idiomatic rkyv-js with `r.Infer<>` types.
+    pub ts: String,
+    /// Contents of `bindings.js` — runtime-only, browser-importable.
+    pub js: String,
+}
+
+/// Scan `src` for rkyv structs + `#[wasm_zero]` functions and write
+/// `bindings.ts` and `bindings.js` into `out_dir`, creating it if needed.
 ///
-/// Intended to be called from a `build.rs`. Emits the appropriate
-/// `cargo:rerun-if-changed` line so the bindings are regenerated whenever the
-/// source changes. Panics (failing the build) if the source cannot be read or
-/// parsed, or the output cannot be written — a build script has no better
-/// recovery than to surface the error.
-pub fn generate(src: impl AsRef<Path>, out: impl AsRef<Path>) {
+/// Intended to be called from a `build.rs`; emits the appropriate
+/// `cargo:rerun-if-changed` line. Panics (failing the build) on
+/// read/parse/write errors — a build script has no better recovery.
+pub fn generate(src: impl AsRef<Path>, out_dir: impl AsRef<Path>) {
     let src = src.as_ref();
-    let out = out.as_ref();
+    let out_dir = out_dir.as_ref();
 
     let source = std::fs::read_to_string(src).unwrap_or_else(|e| {
         panic!("wasm_zero_build: failed to read {}: {e}", src.display())
     });
 
-    let bindings = generate_bindings(&source).unwrap_or_else(|e| {
+    let generated = generate_bindings(&source).unwrap_or_else(|e| {
         panic!("wasm_zero_build: failed to parse {}: {e}", src.display())
     });
 
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent).unwrap_or_else(|e| {
-            panic!(
-                "wasm_zero_build: failed to create {}: {e}",
-                parent.display()
-            )
+    std::fs::create_dir_all(out_dir).unwrap_or_else(|e| {
+        panic!("wasm_zero_build: failed to create {}: {e}", out_dir.display())
+    });
+
+    for (name, contents) in
+        [("bindings.ts", &generated.ts), ("bindings.js", &generated.js)]
+    {
+        let path = out_dir.join(name);
+        std::fs::write(&path, contents).unwrap_or_else(|e| {
+            panic!("wasm_zero_build: failed to write {}: {e}", path.display())
         });
     }
-
-    std::fs::write(out, bindings).unwrap_or_else(|e| {
-        panic!("wasm_zero_build: failed to write {}: {e}", out.display())
-    });
 
     println!("cargo:rerun-if-changed={}", src.display());
 }
 
-/// Parse `source` and render the full TypeScript bindings file.
-///
-/// Pure (no I/O), so it can be unit-tested directly. Emits a TS `interface` for
-/// every struct that derives `rkyv::Archive`, followed by an `async` wrapper
-/// for every `#[wasm_zero]` function.
-pub fn generate_bindings(source: &str) -> syn::Result<String> {
+/// Parse `source` and render both binding files. Pure (no I/O), so it can be
+/// unit-tested directly.
+pub fn generate_bindings(source: &str) -> syn::Result<Generated> {
     let file = syn::parse_file(source)?;
 
-    let mut out = String::new();
-    out.push_str("// Auto-generated by wasm_zero. Do not edit by hand.\n");
-    out.push_str(&format!(
-        "import {{ wasm, malloc, free, deserialize, ErrorCode, WasmError, MAX_BUFFER_SIZE }} from \"{RUNTIME_MODULE}\";\n"
-    ));
-
+    let mut structs: Vec<StructDef> = Vec::new();
     for item in &file.items {
         if let Item::Struct(s) = item {
             if derives_archive(s) {
-                out.push_str(&generate_ts_interface(s));
+                if let Fields::Named(fields) = &s.fields {
+                    let named = fields
+                        .named
+                        .iter()
+                        .map(|f| {
+                            (f.ident.as_ref().unwrap().to_string(), f.ty.clone())
+                        })
+                        .collect();
+                    structs.push((s.ident.to_string(), named));
+                }
             }
         }
     }
+    let struct_names: BTreeSet<String> =
+        structs.iter().map(|(n, _)| n.clone()).collect();
 
-    for item in &file.items {
-        if let Item::Fn(f) = item {
-            if has_wasm_zero_attr(f) {
-                out.push_str(&generate_ts_function(f));
-            }
-        }
-    }
+    let funcs: Vec<&ItemFn> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(f) if has_wasm_zero_attr(f) => Some(f),
+            _ => None,
+        })
+        .collect();
 
-    Ok(out)
+    Ok(Generated {
+        ts: render_module(true, &structs, &struct_names, &funcs),
+        js: render_module(false, &structs, &struct_names, &funcs),
+    })
 }
 
 /// True if the function carries the `#[wasm_zero]` attribute.
@@ -111,15 +137,13 @@ fn has_wasm_zero_attr(f: &ItemFn) -> bool {
     f.attrs.iter().any(|a| a.path().is_ident("wasm_zero"))
 }
 
-/// True if the struct has a `#[derive(...)]` that includes `Archive`, i.e. it is
-/// an rkyv-serializable type that may appear as a `#[wasm_zero]` return value.
+/// True if the struct's `#[derive(...)]` includes `Archive`.
 fn derives_archive(s: &ItemStruct) -> bool {
     s.attrs.iter().any(|attr| {
         if !attr.path().is_ident("derive") {
             return false;
         }
         let mut found = false;
-        // `parse_nested_meta` walks each path in `#[derive(A, B, ...)]`.
         let _ = attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("Archive") {
                 found = true;
@@ -130,161 +154,270 @@ fn derives_archive(s: &ItemStruct) -> bool {
     })
 }
 
-/// Render the `async` wrapper for one `#[wasm_zero]` function.
-///
-/// The wrapper mirrors the FFI shim emitted by `wasm_zero_macro`: it allocates a
-/// `[len: u32][payload]` output buffer, invokes `__wasm_zero_<name>(outPtr)`,
-/// checks the returned [`ErrorCode`], deserializes the payload, and always frees
-/// the buffer.
-///
-/// Note: the current shim ABI takes no inputs beyond the output pointer, so the
-/// generated wrappers are nullary — matching the macro's generated signature.
-fn generate_ts_function(f: &ItemFn) -> String {
-    let name = f.sig.ident.to_string();
-    let shim_name = format!("__wasm_zero_{name}");
-
-    let ts_return = match &f.sig.output {
-        ReturnType::Type(_, ty) => rust_type_to_ts(ty),
-        ReturnType::Default => "void".to_string(),
-    };
-
-    format!(
-        r#"
-export async function {name}(): Promise<{ts_return}> {{
-    const outPtr = malloc(4 + MAX_BUFFER_SIZE);
-    try {{
-        const errCode = wasm.{shim_name}(outPtr);
-        if (errCode !== ErrorCode.Ok) throw new WasmError(errCode);
-        return deserialize<{ts_return}>(outPtr);
-    }} finally {{
-        free(outPtr, 4 + MAX_BUFFER_SIZE);
-    }}
-}}
-"#
-    )
-}
-
-/// Render a TS `interface` mirroring an rkyv struct's public named fields.
-///
-/// Tuple structs and unit structs have no named fields to project, so they are
-/// emitted as empty interfaces (the type name still needs to exist for return
-/// types to resolve).
-fn generate_ts_interface(s: &ItemStruct) -> String {
-    let name = s.ident.to_string();
-
-    let mut body = String::new();
-    if let syn::Fields::Named(fields) = &s.fields {
-        for field in &fields.named {
-            // Unwrap is safe: `Fields::Named` guarantees every field is named.
-            let field_name = field.ident.as_ref().unwrap().to_string();
-            let ts_ty = rust_type_to_ts(&field.ty);
-            body.push_str(&format!("    {field_name}: {ts_ty};\n"));
+/// The return type of a `#[wasm_zero]` function (the macro guarantees one).
+fn return_type(f: &ItemFn) -> &Type {
+    match &f.sig.output {
+        ReturnType::Type(_, ty) => ty,
+        ReturnType::Default => {
+            panic!("wasm_zero_build: `{}` has no return type", f.sig.ident)
         }
     }
-
-    format!("\nexport interface {name} {{\n{body}}}\n")
 }
 
-/// Map a Rust type to its TypeScript equivalent.
+/// Render the full bindings module. With `typed`, emits a `.ts` (rkyv-js
+/// `r.Infer<>` types + type annotations); otherwise a runtime-only `.js`.
+fn render_module(
+    typed: bool,
+    structs: &[StructDef],
+    names: &BTreeSet<String>,
+    funcs: &[&ItemFn],
+) -> String {
+    // `t(s)` includes a TypeScript-only fragment when generating the `.ts`.
+    let t = |s: &str| if typed { s.to_string() } else { String::new() };
+
+    let mut out = String::new();
+    out.push_str("// Auto-generated by wasm_zero. Do not edit by hand.\n");
+    out.push_str("import * as r from 'rkyv-js';\n\n");
+
+    // ---- FFI runtime ----
+    out.push_str(
+        "export const ErrorCode = Object.freeze({ Ok: 0, UnarchivingError: 254, ArchivingError: 255 });\n\n\
+         export class WasmError extends Error {\n\
+         \x20 constructor(code) {\n\
+         \x20   super(`wasm_zero call failed with ErrorCode ${code}`);\n\
+         \x20   this.name = 'WasmError';\n\
+         \x20   this.code = code;\n\
+         \x20 }\n\
+         }\n\n\
+         // Scratch buffer the shim writes its `[len][payload]` into.\n\
+         export const MAX_BUFFER_SIZE = 64 * 1024;\n\n",
+    );
+
+    // ---- rkyv-js codecs ----
+    out.push_str("// ---- codecs ----\n");
+    for (name, fields) in structs {
+        out.push_str(&format!("export const Archived{name} = r.struct({{\n"));
+        for (field, ty) in fields {
+            out.push_str(&format!("  {field}: {},\n", codec_expr(ty, names)));
+        }
+        out.push_str("});\n");
+        out.push_str(&t(&format!(
+            "export type {name} = r.Infer<typeof Archived{name}>;\n"
+        )));
+        out.push('\n');
+    }
+
+    // ---- FFI client ----
+    out.push_str("// ---- client ----\n");
+    out.push_str(&format!(
+        "export function bindWasmZero(wasm{}) {{\n\
+         \x20 function call(shim{}, codec{}) {{\n\
+         \x20   const outPtr = wasm.malloc(4 + MAX_BUFFER_SIZE);\n\
+         \x20   try {{\n\
+         \x20     const code = wasm[shim](outPtr);\n\
+         \x20     if (code !== ErrorCode.Ok) throw new WasmError(code);\n\
+         \x20     // Re-read memory after the call — malloc may have grown it.\n\
+         \x20     const view = new DataView(wasm.memory.buffer);\n\
+         \x20     const len = view.getUint32(outPtr, true);\n\
+         \x20     // Copy the archive out before freeing the scratch buffer.\n\
+         \x20     const bytes = new Uint8Array(wasm.memory.buffer, outPtr + 4, len).slice();\n\
+         \x20     return r.decode(codec, bytes);\n\
+         \x20   }} finally {{\n\
+         \x20     wasm.free(outPtr, 4 + MAX_BUFFER_SIZE);\n\
+         \x20   }}\n\
+         \x20 }}\n\n\
+         \x20 return {{\n\
+         \x20   wasm,\n",
+        t(": any"),
+        t(": string"),
+        t(": any"),
+    ));
+    for f in funcs {
+        let name = f.sig.ident.to_string();
+        let shim = format!("__wasm_zero_{name}");
+        let ret = return_type(f);
+        let codec = codec_expr(ret, names);
+        let ann = t(&format!(": {}", ts_type(ret, names)));
+        out.push_str(&format!(
+            "    {name}(){ann} {{ return call({shim:?}, {codec}); }},\n"
+        ));
+    }
+    out.push_str("  };\n}\n\n");
+
+    out.push_str(&format!(
+        "export async function initWasmZero(wasmUrl{}, imports{}) {{\n\
+         \x20 const importObject =\n\
+         \x20   imports ?? new Proxy({{}}, {{ get: () => new Proxy({{}}, {{ get: () => () => {{}} }}) }});\n\
+         \x20 const {{ instance }} = await WebAssembly.instantiateStreaming(fetch(wasmUrl), importObject);\n\
+         \x20 return bindWasmZero(instance.exports);\n\
+         }}\n",
+        t(": string | URL"),
+        t("?: WebAssembly.Imports"),
+    ));
+
+    out
+}
+
+/// Map a Rust type to its rkyv-js codec expression (e.g. `r.option(r.string)`).
 ///
-/// Handles the rkyv-friendly primitives, `String`/`&str`, `Vec<T>` → `T[]`,
-/// `Option<T>` → `T | null`, and references (by recursing into the referent).
-/// Unknown named types are passed through verbatim so they resolve against a
-/// generated interface; anything else falls back to `unknown`.
-fn rust_type_to_ts(ty: &Type) -> String {
+/// Follows the rkyv-js codec table. User structs resolve to their generated
+/// `Archived<Name>` codec. Panics on types with no known codec, so an
+/// unsupported field fails the build loudly rather than producing wrong code.
+fn codec_expr(ty: &Type, structs: &BTreeSet<String>) -> String {
     match ty {
-        Type::Reference(r) => rust_type_to_ts(&r.elem),
-        Type::Paren(p) => rust_type_to_ts(&p.elem),
-        Type::Group(g) => rust_type_to_ts(&g.elem),
-        Type::Slice(s) => format!("{}[]", rust_type_to_ts(&s.elem)),
-        Type::Array(a) => format!("{}[]", rust_type_to_ts(&a.elem)),
-        Type::Path(p) => {
-            let Some(segment) = p.path.segments.last() else {
-                return "unknown".to_string();
+        Type::Reference(r) => codec_expr(&r.elem, structs),
+        Type::Group(g) => codec_expr(&g.elem, structs),
+        Type::Paren(p) => codec_expr(&p.elem, structs),
+        Type::Tuple(t) if t.elems.is_empty() => "r.unit".to_string(),
+        Type::Tuple(t) => {
+            let inner: Vec<_> =
+                t.elems.iter().map(|e| codec_expr(e, structs)).collect();
+            format!("r.tuple({})", inner.join(", "))
+        }
+        Type::Array(a) => format!(
+            "r.array({}, {})",
+            codec_expr(&a.elem, structs),
+            a.len.to_token_stream()
+        ),
+        Type::Path(_) => {
+            let (ident, args) = path_parts(ty);
+            let arg0 = |structs: &BTreeSet<String>| {
+                codec_expr(args.first().expect("container needs a type arg"), structs)
             };
-            let ident = segment.ident.to_string();
-
-            // Handle the single-generic containers by inspecting their argument.
-            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                let inner = args.args.iter().find_map(|arg| match arg {
-                    syn::GenericArgument::Type(t) => Some(t),
-                    _ => None,
-                });
-                if let Some(inner) = inner {
-                    match ident.as_str() {
-                        "Vec" | "Box" => {
-                            if ident == "Box" {
-                                return rust_type_to_ts(inner);
-                            }
-                            return format!("{}[]", rust_type_to_ts(inner));
-                        }
-                        "Option" => {
-                            return format!("{} | null", rust_type_to_ts(inner))
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
             match ident.as_str() {
-                "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" | "f64"
+                "Vec" | "ThinVec" | "SmallVec" | "TinyVec" | "ArrayVec" => {
+                    format!("r.vec({})", arg0(structs))
+                }
+                "Option" => format!("r.option({})", arg0(structs)),
+                "Box" => format!("r.box({})", arg0(structs)),
+                "Rc" | "Arc" => format!("r.rc({})", arg0(structs)),
+                "Weak" => format!("r.weak({})", arg0(structs)),
+                "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64"
+                | "f32" | "f64" | "bool" | "char" => {
+                    format!("r.{ident}")
+                }
+                "usize" => "r.u32".to_string(),
+                "isize" => "r.i32".to_string(),
+                "String" | "str" | "SmolStr" => "r.string".to_string(),
+                name if structs.contains(name) => format!("Archived{name}"),
+                other => panic!(
+                    "wasm_zero_build: no rkyv-js codec known for type `{other}`. \
+                     Supported: primitives, String, Vec/Option/Box/Rc/Arc/Weak, \
+                     arrays, tuples, and #[derive(Archive)] structs."
+                ),
+            }
+        }
+        other => panic!(
+            "wasm_zero_build: unsupported type `{}`",
+            other.to_token_stream()
+        ),
+    }
+}
+
+/// Map a Rust type to its TypeScript type (mirrors the rkyv-js codec table).
+fn ts_type(ty: &Type, structs: &BTreeSet<String>) -> String {
+    match ty {
+        Type::Reference(r) => ts_type(&r.elem, structs),
+        Type::Group(g) => ts_type(&g.elem, structs),
+        Type::Paren(p) => ts_type(&p.elem, structs),
+        Type::Tuple(t) if t.elems.is_empty() => "null".to_string(),
+        Type::Tuple(t) => {
+            let inner: Vec<_> =
+                t.elems.iter().map(|e| ts_type(e, structs)).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Type::Array(a) => format!("{}[]", ts_type(&a.elem, structs)),
+        Type::Path(_) => {
+            let (ident, args) = path_parts(ty);
+            let arg0 = || ts_type(args.first().expect("container needs a type arg"), structs);
+            match ident.as_str() {
+                "Vec" | "ThinVec" | "SmallVec" | "TinyVec" | "ArrayVec" => {
+                    format!("{}[]", arg0())
+                }
+                "Option" | "Weak" => format!("{} | null", arg0()),
+                "Box" | "Rc" | "Arc" => arg0(),
+                "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64"
                 | "usize" | "isize" => "number".to_string(),
                 "u64" | "i64" | "u128" | "i128" => "bigint".to_string(),
                 "bool" => "boolean".to_string(),
-                "String" | "str" | "char" => "string".to_string(),
-                // A user-defined type — assume a matching interface exists.
+                "String" | "str" | "SmolStr" | "char" => "string".to_string(),
+                name if structs.contains(name) => name.to_string(),
                 other => other.to_string(),
             }
         }
-        Type::Tuple(t) if t.elems.is_empty() => "void".to_string(),
         _ => "unknown".to_string(),
     }
+}
+
+/// Extract the last path segment's identifier and its generic type arguments.
+fn path_parts(ty: &Type) -> (String, Vec<Type>) {
+    if let Type::Path(p) = ty {
+        if let Some(seg) = p.path.segments.last() {
+            let args = match &seg.arguments {
+                syn::PathArguments::AngleBracketed(a) => a
+                    .args
+                    .iter()
+                    .filter_map(|g| match g {
+                        syn::GenericArgument::Type(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            return (seg.ident.to_string(), args);
+        }
+    }
+    (String::new(), Vec::new())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const SAMPLE: &str = r#"
+        #[derive(Archive, Serialize, Deserialize)]
+        pub struct Person {
+            pub name: String,
+            pub age: u32,
+            pub email: Option<String>,
+            pub scores: Vec<u32>,
+        }
+
+        #[wasm_zero]
+        pub fn get_adult_person() -> Person { todo!() }
+
+        #[wasm_zero]
+        pub fn greet() -> String { todo!() }
+
+        pub fn ignored() -> u32 { 0 }
+    "#;
+
     #[test]
-    fn maps_primitives() {
-        assert_eq!(rust_type_to_ts(&syn::parse_quote!(u32)), "number");
-        assert_eq!(rust_type_to_ts(&syn::parse_quote!(u64)), "bigint");
-        assert_eq!(rust_type_to_ts(&syn::parse_quote!(bool)), "boolean");
-        assert_eq!(rust_type_to_ts(&syn::parse_quote!(String)), "string");
-        assert_eq!(rust_type_to_ts(&syn::parse_quote!(&str)), "string");
+    fn generates_rkyv_js_codec() {
+        let g = generate_bindings(SAMPLE).unwrap();
+        assert!(g.ts.contains("export const ArchivedPerson = r.struct({"));
+        assert!(g.ts.contains("name: r.string,"));
+        assert!(g.ts.contains("age: r.u32,"));
+        assert!(g.ts.contains("email: r.option(r.string),"));
+        assert!(g.ts.contains("scores: r.vec(r.u32),"));
+        // Infer type alias only in the .ts.
+        assert!(g.ts.contains("export type Person = r.Infer<typeof ArchivedPerson>;"));
+        assert!(!g.js.contains("r.Infer"));
     }
 
     #[test]
-    fn maps_containers() {
-        assert_eq!(rust_type_to_ts(&syn::parse_quote!(Vec<u8>)), "number[]");
-        assert_eq!(
-            rust_type_to_ts(&syn::parse_quote!(Option<String>)),
-            "string | null"
-        );
-        assert_eq!(rust_type_to_ts(&syn::parse_quote!(Person)), "Person");
-    }
-
-    #[test]
-    fn generates_interface_and_function() {
-        let src = r#"
-            #[derive(Archive, Serialize, Deserialize)]
-            pub struct Person { pub name: String, pub age: u32 }
-
-            #[wasm_zero]
-            pub fn get_adult_person() -> Person { todo!() }
-
-            pub fn ignored() -> u32 { 0 }
-        "#;
-
-        let out = generate_bindings(src).unwrap();
-        assert!(out.contains("export interface Person {"));
-        assert!(out.contains("name: string;"));
-        assert!(out.contains("age: number;"));
-        assert!(out.contains(
-            "export async function get_adult_person(): Promise<Person>"
+    fn generates_client() {
+        let g = generate_bindings(SAMPLE).unwrap();
+        assert!(g.js.contains(
+            "get_adult_person() { return call(\"__wasm_zero_get_adult_person\", ArchivedPerson); }"
         ));
-        assert!(out.contains("wasm.__wasm_zero_get_adult_person(outPtr)"));
-        // Functions without the attribute are not exported.
-        assert!(!out.contains("function ignored"));
+        assert!(g
+            .js
+            .contains("greet() { return call(\"__wasm_zero_greet\", r.string); }"));
+        assert!(g.ts.contains("get_adult_person(): Person {"));
+        assert!(g.ts.contains("greet(): string {"));
+        assert!(g.js.contains("export async function initWasmZero"));
+        assert!(g.js.contains("r.decode(codec, bytes)"));
+        assert!(!g.js.contains("ignored"));
     }
 }

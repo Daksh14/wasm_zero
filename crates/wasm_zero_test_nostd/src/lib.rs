@@ -1,22 +1,23 @@
 #![no_std]
 
-use crate::alloc::string::ToString;
 extern crate alloc;
+
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 #[global_allocator]
 static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 
-use alloc::format;
-use alloc::string::String;
-use wasm_bindgen::prelude::*;
-use wasm_zero::wasm_zero;
-
 use rkyv::{Archive, Deserialize, Serialize};
+use wasm_zero::wasm_zero;
 
 #[derive(Archive, Serialize, Deserialize)]
 pub struct Person {
     pub name: String,
     pub age: u32,
+    pub email: Option<String>,
+    pub scores: Vec<u32>,
 }
 
 #[wasm_zero]
@@ -24,15 +25,17 @@ pub fn get_adult_person() -> Person {
     Person {
         name: "Susize".to_string(),
         age: 25,
+        email: Some("susize@example.com".to_string()),
+        scores: vec![95, 87, 92],
     }
 }
 
 #[wasm_zero]
-pub fn greet(name: &str) -> String {
-    format!("Hello, {name}! wasm_zero (no_std) is loaded.")
+pub fn greet() -> String {
+    "Hello! wasm_zero (no_std) is loaded.".to_string()
 }
 
-// #[wasm_bindgen]
-// pub fn greet(name: &str) -> String {
-//     format!("Hello, {name}! wasm_zero (no_std) is loaded.")
-// }
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    core::arch::wasm32::unreachable()
+}
