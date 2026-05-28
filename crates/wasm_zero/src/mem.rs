@@ -18,6 +18,22 @@ use crate::error::ErrorCode;
 // big enough to cover all rkyv archived types
 const ALIGNMENT: usize = 16;
 
+/// Byte offset of the archive payload within a `[len][archive]` buffer.
+///
+/// The length is a `u32` at offset 0; the archive starts at `HEADER`. We pad to
+/// 16 (rather than 4) so that — because `malloc` returns 16-aligned pointers —
+/// the archive base is 16-aligned. That lets JS build correctly-aligned
+/// zero-copy typed-array views over archived `Vec<T>` data (a `Float64Array`
+/// view needs an 8-aligned offset). Must match the `HEADER` constant in the
+/// generated JS bindings.
+pub const HEADER: usize = 16;
+
+/// Capacity (bytes) the JS scratch output buffer reserves for the archive
+/// payload. The shim serializes directly into this region, so it bounds the
+/// largest value a `#[wasm_zero]` function may return. Must match
+/// `MAX_BUFFER_SIZE` in the generated JS bindings.
+pub const MAX_BUFFER_SIZE: usize = 64 * 1024;
+
 #[unsafe(no_mangle)]
 pub fn malloc(len: u32) -> u32 {
     // SAFETY: We use the same ALIGNMENT big enough to cover rkyv types
@@ -45,7 +61,7 @@ pub unsafe fn read_buffer<'a>(ptr: *const u8) -> &'a [u8] {
     unsafe {
         let len = slice::from_raw_parts(ptr, 4);
         let len = u32::from_le_bytes(len.try_into().unwrap()) as usize;
-        slice::from_raw_parts(ptr.add(4), len)
+        slice::from_raw_parts(ptr.add(HEADER), len)
     }
 }
 

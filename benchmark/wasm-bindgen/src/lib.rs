@@ -1,0 +1,206 @@
+use serde::Serialize;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use web_sys::Node;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = thunk)]
+    fn js_thunk();
+    #[wasm_bindgen(js_name = add)]
+    fn js_add(a: i32, b: i32) -> i32;
+
+    pub type Foo;
+    #[wasm_bindgen(method)]
+    fn bar(this: &Foo);
+    #[wasm_bindgen(method, structural, js_name = bar)]
+    fn bar_structural(this: &Foo);
+
+    fn doesnt_throw();
+    #[wasm_bindgen(catch, js_name = doesnt_throw)]
+    fn doesnt_throw_catch() -> Result<(), JsValue>;
+}
+
+#[wasm_bindgen]
+pub fn call_js_thunk_n_times(n: usize) {
+    for _ in 0..n {
+        js_thunk();
+    }
+}
+
+#[wasm_bindgen]
+pub fn call_js_add_n_times(n: usize, a: i32, b: i32) {
+    for _ in 0..n {
+        js_add(a, b);
+    }
+}
+
+#[wasm_bindgen]
+pub fn thunk() {}
+
+#[wasm_bindgen]
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+static mut FIB_HIGH: i32 = 0;
+
+#[wasm_bindgen]
+pub fn fibonacci(n: i32) -> i32 {
+    let mut a = 1u64;
+    let mut b = 1;
+    for _ in 0..n {
+        let tmp = b;
+        b += a;
+        a = tmp;
+    }
+    unsafe {
+        FIB_HIGH = (a >> 32) as i32;
+    }
+    return a as i32;
+}
+
+#[wasm_bindgen]
+pub fn fibonacci_high() -> i32 {
+    unsafe { FIB_HIGH }
+}
+
+#[wasm_bindgen]
+pub fn call_foo_bar_n_times(n: usize, foo: &Foo) {
+    for _ in 0..n {
+        foo.bar();
+    }
+}
+
+#[wasm_bindgen]
+pub fn call_foo_bar_structural_n_times(n: usize, foo: &Foo) {
+    for _ in 0..n {
+        foo.bar_structural();
+    }
+}
+
+#[wasm_bindgen]
+pub fn call_doesnt_throw_n_times(n: usize) {
+    for _ in 0..n {
+        doesnt_throw();
+    }
+}
+
+#[wasm_bindgen]
+pub fn call_doesnt_throw_with_catch_n_times(n: usize) {
+    for _ in 0..n {
+        if let Err(e) = doesnt_throw_catch() {
+            wasm_bindgen::throw_val(e);
+        }
+    }
+}
+
+#[wasm_bindgen]
+extern "C" {
+    pub type Element;
+
+    #[wasm_bindgen(method, js_name = firstChild, getter)]
+    fn first_child(this: &Element) -> Option<Element>;
+    #[wasm_bindgen(method, js_name = firstChild, structural, getter)]
+    fn first_child_structural(this: &Element) -> Option<Element>;
+}
+
+#[wasm_bindgen]
+pub fn call_first_child_n_times(n: usize, element: &Element) {
+    for _ in 0..n {
+        assert!(element.first_child().is_some());
+    }
+}
+
+#[wasm_bindgen]
+pub fn call_first_child_structural_n_times(n: usize, element: &Element) {
+    for _ in 0..n {
+        assert!(element.first_child_structural().is_some());
+    }
+}
+
+#[wasm_bindgen]
+pub fn call_node_first_child_n_times(n: usize, elements: Vec<JsValue>) {
+    for _ in 0..n {
+        for element in elements.iter() {
+            let element = element.unchecked_ref::<Node>();
+            assert!(element.first_child().is_some());
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn call_node_node_type_n_times(n: usize, elements: Vec<JsValue>) {
+    for _ in 0..n {
+        for element in elements.iter() {
+            let element = element.unchecked_ref::<Node>();
+            assert!(element.node_type() != 100);
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn call_node_has_child_nodes_n_times(n: usize, elements: Vec<JsValue>) {
+    for _ in 0..n {
+        for element in elements.iter() {
+            let element = element.unchecked_ref::<Node>();
+            assert!(element.has_child_nodes());
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn count_node_types(element: Node) {
+    count_node_types_inner(element, &mut Vec::new());
+
+    fn count_node_types_inner(mut element: Node, count: &mut Vec<u32>) {
+        loop {
+            let t = element.node_type();
+            if t as usize >= count.len() {
+                count.resize(t as usize + 1, 0);
+            }
+            count[t as usize] += 1;
+            if let Some(s) = element.first_child() {
+                count_node_types_inner(s, count);
+            }
+            match element.next_sibling() {
+                Some(s) => element = s,
+                None => break,
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data round-trip benchmarks — the wasm_zero comparison point.
+//
+// These return structured data to JS the wasm-bindgen way (serde-wasm-bindgen
+// for the struct, a native typed-array return for the Vec). The wasm_zero
+// crate returns the *same* values via rkyv; the harness times both.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct Person {
+    pub name: String,
+    pub age: u32,
+    pub email: Option<String>,
+    pub scores: Vec<u32>,
+}
+
+/// Matches `bench_wasm_zero::get_person`.
+#[wasm_bindgen]
+pub fn get_person() -> JsValue {
+    let person = Person {
+        name: "Susize".to_string(),
+        age: 25,
+        email: Some("susize@example.com".to_string()),
+        scores: vec![95, 87, 92],
+    };
+    serde_wasm_bindgen::to_value(&person).unwrap()
+}
+
+/// Matches `bench_wasm_zero::get_scores` (1024 u32s).
+#[wasm_bindgen]
+pub fn get_scores() -> Vec<u32> {
+    (0..1024u32).collect()
+}

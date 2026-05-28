@@ -14,6 +14,11 @@ export class WasmError extends Error {
 // Scratch buffer the shim writes its `[len][payload]` into.
 export const MAX_BUFFER_SIZE = 64 * 1024;
 
+// Buffer framing: [len: u32 @0][archive @ HEADER]. Must match
+// wasm_zero::mem::HEADER (16 — keeps the archive 16-aligned so
+// zero-copy typed-array views are correctly aligned).
+const HEADER = 16;
+
 // ---- codecs ----
 export const ArchivedPerson = r.struct({
   name: r.string,
@@ -25,26 +30,72 @@ export type Person = r.Infer<typeof ArchivedPerson>;
 
 // ---- client ----
 export function bindWasmZero(wasm: any) {
-  function call(shim: string, codec: any) {
-    const outPtr = wasm.malloc(4 + MAX_BUFFER_SIZE);
-    try {
-      const code = wasm[shim](outPtr);
-      if (code !== ErrorCode.Ok) throw new WasmError(code);
-      // Re-read memory after the call — malloc may have grown it.
-      const view = new DataView(wasm.memory.buffer);
-      const len = view.getUint32(outPtr, true);
-      // Copy the archive out before freeing the scratch buffer.
-      const bytes = new Uint8Array(wasm.memory.buffer, outPtr + 4, len).slice();
-      return r.decode(codec, bytes);
-    } finally {
-      wasm.free(outPtr, 4 + MAX_BUFFER_SIZE);
+  // Persistent scratch buffers, allocated once and reused across
+  // calls to avoid a malloc/free per call. Not re-entrant: a call
+  // must finish before the next one on the same instance.
+  const outPtr = wasm.malloc(HEADER + MAX_BUFFER_SIZE);
+  let inPtr = 0; // allocated lazily on first call that takes args
+
+  // Cached views over wasm memory, rebuilt only when a memory.grow
+  // replaces (detaches) the underlying ArrayBuffer.
+  let buf = wasm.memory.buffer;
+  let dv = new DataView(buf);
+  let u8 = new Uint8Array(buf);
+  function views() {
+    if (buf !== wasm.memory.buffer) {
+      buf = wasm.memory.buffer;
+      dv = new DataView(buf);
+      u8 = new Uint8Array(buf);
     }
+  }
+
+  // Run the shim. Scalar args (directArgs) are passed straight as
+  // wasm params; non-scalar args are rkyv-encoded into the input buffer.
+  function invoke(shim: string, argCodec: any, argValue: any, directArgs: any) {
+    if (directArgs !== null) return wasm[shim](...directArgs, outPtr);
+    if (argCodec === null) return wasm[shim](outPtr);
+    const inBytes = r.encode(argCodec, argValue);
+    if (inBytes.length > MAX_BUFFER_SIZE)
+      throw new RangeError(`wasm_zero: input ${inBytes.length} bytes exceeds MAX_BUFFER_SIZE`);
+    if (inPtr === 0) inPtr = wasm.malloc(HEADER + MAX_BUFFER_SIZE);
+    views(); // malloc may have grown memory
+    dv.setUint32(inPtr, inBytes.length, true);
+    u8.set(inBytes, inPtr + HEADER);
+    return wasm[shim](inPtr, outPtr);
+  }
+
+  // Eagerly decode the output archive into an owned JS value (one
+  // pass; reads the view but copies fields out, so the result is
+  // safe to keep across later calls). Numeric Vec returns instead use
+  // callView for a zero-copy typed-array view.
+  function call(shim: string, retCodec: any, argCodec: any, argValue: any, directArgs: any) {
+    const code = invoke(shim, argCodec, argValue, directArgs);
+    if (code !== ErrorCode.Ok) throw new WasmError(code);
+    views(); // the call may have grown memory
+    const len = dv.getUint32(outPtr, true);
+    return r.decode(retCodec, u8.subarray(outPtr + HEADER, outPtr + HEADER + len));
+  }
+
+  // Zero-copy view over an archived Vec<numeric> in wasm memory.
+  // WARNING: aliases the shared scratch buffer — only valid until the
+  // next call on this instance (or a memory.grow). Copy if you need to
+  // keep it: e.g. `wasmzero.foo().slice()`.
+  function callView(shim: string, argCodec: any, argValue: any, Ctor: any, directArgs: any) {
+    const code = invoke(shim, argCodec, argValue, directArgs);
+    if (code !== ErrorCode.Ok) throw new WasmError(code);
+    views();
+    const archiveLen = dv.getUint32(outPtr, true);
+    const base = outPtr + HEADER;
+    const rootPos = base + archiveLen - 8; // ArchivedVec is 8 bytes
+    const off = dv.getInt32(rootPos, true);
+    const len = dv.getUint32(rootPos + 4, true);
+    return new Ctor(wasm.memory.buffer, rootPos + off, len);
   }
 
   return {
     wasm,
-    get_adult_person(): Person { return call("__wasm_zero_get_adult_person", ArchivedPerson); },
-    greet(): string { return call("__wasm_zero_greet", r.string); },
+    get_adult_person(): Person { return call("__wasm_zero_get_adult_person", ArchivedPerson, null, null, null); },
+    greet(): string { return call("__wasm_zero_greet", r.string, null, null, null); },
   };
 }
 

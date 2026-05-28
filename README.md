@@ -59,15 +59,28 @@ This is the same division `prost`/`prost-build` and `uniffi` use.
 
 ### The FFI / memory protocol
 
-For each `#[wasm_zero] fn foo() -> T` (functions must be **nullary**):
+For each `#[wasm_zero] fn foo(args...) -> T`:
 
-1. The module exports `__wasm_zero_foo(out_ptr: u32) -> u32` plus `malloc` /
-   `free` (from `wasm_zero::mem`).
-2. JS allocates a scratch buffer and calls the shim with its pointer.
-3. The shim writes `[len: u32 little-endian][rkyv archive bytes]` at `out_ptr`
-   and returns an [`ErrorCode`](crates/wasm_zero/src/error.rs) (`Ok == 0`).
-4. JS reads `len`, copies out the archive bytes, and decodes them with
-   `r.decode(codec, bytes)`.
+1. The module exports a shim plus `malloc` / `free` (from `wasm_zero::mem`).
+   Nullary functions export `__wasm_zero_foo(out_ptr) -> u32`; functions with
+   arguments export `__wasm_zero_foo(in_ptr, out_ptr) -> u32`.
+2. Arguments that are scalar primitives (`i8`…`u64`, `f32`, `f64`, `bool`) are
+   passed **directly as wasm function parameters** — no encoding, no input
+   buffer (the fast path). If any argument is non-scalar (`String`, a struct,
+   `Vec`, …), all args are instead rkyv-encoded (`r.encode`) into an input
+   buffer (`[len][bytes]`) and `in_ptr` is passed.
+3. If the return type is a scalar primitive or `()`, the shim **returns it
+   directly** as the wasm function's return value — no output buffer, no rkyv,
+   no error code (it can't fail). Otherwise it writes
+   `[len: u32 little-endian][rkyv archive bytes]` at `out_ptr` and returns an
+   [`ErrorCode`](crates/wasm_zero/src/error.rs) (`Ok == 0`).
+4. For buffer returns, JS reads `len` and decodes from a `Uint8Array` view into
+   wasm memory (`r.decode` for structs/strings → an owned value; a typed-array
+   *view* for numeric vecs — see [Return handling](#return-handling)).
+   Scalar/unit returns are just the call's return value.
+
+Both directions use the same `[len][bytes]` framing (the archive starts at a
+16-byte-aligned offset so typed-array views are correctly aligned).
 
 rkyv is configured for the format rkyv-js expects: little-endian, aligned
 primitives, **32-bit relative pointers**, root at the end of the buffer.
@@ -82,6 +95,9 @@ primitives, **32-bit relative pointers**, root at the end of the buffer.
 | [`wasm_zero_serve`](crates/wasm_zero_serve) | Tiny axum static-file server for running the demo pages. |
 | [`wasm_zero_test_nostd`](crates/wasm_zero_test_nostd) | `no_std` demo: rkyv types + `#[wasm_zero]` functions + a browser page. |
 | [`wasm_zero_test`](crates/wasm_zero_test) | A `wasm-bindgen`/`std` comparison crate. |
+
+There's also a standalone [`benchmark/`](benchmark) workspace comparing
+`wasm-bindgen` and `wasm_zero` head-to-head (call overhead + data transfer).
 
 ## Usage
 
@@ -193,6 +209,27 @@ The demo crate shows the expected setup for a `no_std` cdylib:
 - a `#[panic_handler]` (`core::arch::wasm32::unreachable()`),
 - `panic = "abort"` (via `.cargo/config.toml`) so no `eh_personality` is needed.
 
+## Optimizing the wasm
+
+wasm_zero already minimizes per-call work: scalar args/returns are bare wasm
+calls (no buffer), the shim **serializes directly into the output buffer** (no
+intermediate allocation or copy), and numeric vecs return zero-copy views.
+
+For the smallest, fastest module, tune the consuming crate's release profile:
+
+```toml
+[profile.release]
+opt-level = "z"    # smallest; use 3 for fastest
+lto = "fat"        # cross-crate inlining
+codegen-units = 1  # max optimization
+strip = true       # drop symbols
+```
+
+Then run [`wasm-opt`](https://github.com/WebAssembly/binaryen) on the output
+(`wasm-opt -O3 app.wasm -o app.wasm`; needs a recent Binaryen). Building with
+`RUSTFLAGS="-C target-feature=+bulk-memory"` enables `memory.copy`/`fill` for
+faster byte copies where your targets support it.
+
 ## Supported types
 
 wasm_zero maps Rust types to rkyv-js codecs:
@@ -213,10 +250,47 @@ wasm_zero maps Rust types to rkyv-js codecs:
 For the full codec catalogue (enums, maps, external crate types), see the
 [rkyv-js](https://www.npmjs.com/package/rkyv-js) docs.
 
+### Argument handling
+
+wasm_zero picks the cheapest way to pass arguments based on their types:
+
+| Arguments | How they cross | Cost |
+|-----------|----------------|------|
+| none | nullary shim | — |
+| all scalar primitives (`i8`…`u64`, `f32`, `f64`, `bool`) | passed **directly as wasm params** | none — like a bare call |
+| any non-scalar (`String`, struct, `Vec`, …) | rkyv-encoded (`r.encode`) into the input buffer | one encode + copy |
+
+(i64/u64 args are passed as JS `BigInt`.)
+
+### Return handling
+
+Likewise for return values:
+
+| Return type | How it crosses | Result |
+|-------------|----------------|--------|
+| scalar primitive or `()` | **returned directly** as the wasm function's value — a bare call, no buffer (matches wasm_bindgen) | `number` / `bigint` / `boolean` / `void` |
+| `Vec<T>` of a numeric primitive | **zero-copy typed-array view** (`Uint32Array`, `Float64Array`, …) straight over the archived elements | a view that **aliases** wasm memory |
+| struct / `String` / `Option` / other | eagerly decoded with `r.decode` | an **owned** JS value (a copy) |
+
+Notes:
+
+- The numeric-vec **view aliases the shared scratch buffer**, so it's only valid
+  until the next call on that instance (or a `memory.grow`). `.slice()` it if you
+  need to keep it.
+- Eagerly decoded values are **owned copies** — safe to keep across later calls.
+- The rkyv layout for numeric vecs is native little-endian, so the view needs no
+  copy and no per-element decode. Strings are always materialized (UTF-8 →
+  UTF-16).
+
+This is why, in the [benchmark](benchmark), `wasm_zero` matches or beats
+wasm_bindgen on scalar calls and numeric-array returns, and trails it only on
+full struct materialization.
+
 ## Limitations
 
-- `#[wasm_zero]` functions must currently be **nullary** — the shim ABI only
-  carries the output pointer.
+- Arguments must be **owned** rkyv types (e.g. `i32`, `String`, a `#[derive(Archive)]`
+  struct) — borrowed parameters like `&str` aren't decodable from the input
+  buffer.
 - Only the default rkyv v0.8 format is supported (little-endian, aligned,
   32-bit pointers), matching rkyv-js.
 - Enums and map types are generated by the underlying rkyv-js codec set but are

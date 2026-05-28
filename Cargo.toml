@@ -1,5 +1,8 @@
 [workspace]
 resolver = "3"
+# benchmark/ is its own workspace so the heavy wasm-bindgen/web-sys deps stay
+# out of the core build.
+exclude = ["benchmark"]
 members = [
     "crates/wasm_zero",
     "crates/wasm_zero_macro",

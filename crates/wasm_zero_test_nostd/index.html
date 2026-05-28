@@ -58,13 +58,22 @@
       const wasmzero = await initWasmZero(WASM_URL);
       out.textContent = '';
 
-      for (const name of ['greet', 'get_adult_person']) {
-        try {
-          show(name, wasmzero[name]());
-        } catch (err) {
-          showError(name, err);
-        }
-      }
+      // Returns are lazy zero-copy values that alias wasm memory and are only
+      // valid until the next call — so read each one's fields into a plain
+      // object immediately (also avoids relying on the proxy being enumerable).
+      try {
+        show('greet', wasmzero.greet());
+      } catch (err) { showError('greet', err); }
+
+      try {
+        const p = wasmzero.get_adult_person();
+        show('get_adult_person', {
+          name: p.name,
+          age: Number(p.age),
+          email: p.email,
+          scores: Array.from(p.scores),
+        });
+      } catch (err) { showError('get_adult_person', err); }
     } catch (err) {
       out.innerHTML = `<div class="err">failed to load wasm: ${err}</div>`;
       console.error(err);

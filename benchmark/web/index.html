@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>wasm_bindgen vs wasm_zero benchmark</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 60rem; }
+    h1 { font-size: 1.5rem; }
+    table { border-collapse: collapse; margin-top: 1rem; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 0.4rem 0.7rem; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    thead th { background: #f4f4f5; }
+    tbody tr:nth-child(even) { background: #fafafa; }
+    button { font-size: 1rem; padding: 0.4rem 0.9rem; }
+    #status { margin-left: 0.8rem; color: #555; }
+    .note { color: #666; font-size: 0.9rem; }
+  </style>
+
+  <!-- wasm-bindgen's `extern` imports resolve against these globals. -->
+  <script>
+    window.thunk = function () {};
+    window.doesnt_throw = function () {};
+    window.add = function (a, b) { return a + b; };
+    window.Foo = class { bar() {} };
+  </script>
+
+  <!-- rkyv-js isn't on npm; build it from GitHub source via esm.sh. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "rkyv-js": "https://esm.sh/gh/cometkim/rkyv-js@2c3fc14"
+    }
+  }
+  </script>
+</head>
+<body>
+  <h1>wasm_bindgen vs wasm_zero</h1>
+  <p class="note">
+    Each row runs a test N times in three suites: a pure-JS baseline,
+    <code>wasm_bindgen</code>, and <code>wasm_zero</code> (lazy zero-copy access
+    via rkyv-js — every field is read so the comparison is fair). Times are the
+    min of several runs; the parenthesised number is the ratio to the JS baseline
+    (lower is faster).
+  </p>
+
+  <button id="run" disabled>Run benchmarks</button>
+  <span id="status">loading…</span>
+
+  <table id="results">
+    <thead>
+      <tr><th>Test</th><th>js</th><th>wasm_bindgen</th><th>wasm_zero</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <p class="note" style="margin-top:1.5rem">
+    <a href="https://github.com/alexcrichton/rust-wasm-benchmark">Modeled on alexcrichton/rust-wasm-benchmark</a>
+  </p>
+
+  <script type="module" src="./index.js"></script>
+</body>
+</html>

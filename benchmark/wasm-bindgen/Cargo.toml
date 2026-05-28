@@ -1,0 +1,18 @@
+[package]
+name = "bench_wasm_bindgen"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Don't let wasm-pack run its (old, fragile) wasm-opt — build.sh runs wasm-opt
+# on both suites itself, so the comparison stays fair.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Node"] }
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"

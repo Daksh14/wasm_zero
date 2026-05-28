@@ -1,0 +1,15 @@
+# Standalone workspace for the wasm_bindgen-vs-wasm_zero benchmark.
+# Kept separate from the parent so wasm-bindgen / web-sys / serde don't leak
+# into the core crates' dependency graph.
+[workspace]
+resolver = "3"
+members = ["wasm-bindgen", "wasm-zero"]
+
+# Applies to both suites (shared workspace) so the comparison is fair.
+# wasm-pack already wasm-opts the wasm-bindgen output; build.sh does the same
+# for the wasm_zero output.
+[profile.release]
+opt-level = 3      # speed (use "z" for smallest)
+lto = "fat"        # cross-crate inlining
+codegen-units = 1  # max optimization
+strip = true       # drop symbols
