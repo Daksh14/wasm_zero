@@ -61,22 +61,18 @@ with a per-suite shipped total. Representative output:
 | Component | wasm_bindgen (gzip) | wasm_zero (gzip) |
 |-----------|---------------------|------------------|
 | `.wasm` | 9.7 KB | 4.3 KB |
-| JS glue / bindings | 3.1 KB | 1.8 KB |
-| **shipped total** | **12.8 KB** | **6.1 KB** |
+| JS glue / bindings | 3.1 KB | 1.5 KB |
+| **shipped total** | **12.8 KB** | **5.8 KB** |
 
-So wasm_zero ships ~2× smaller — there's no wasm-bindgen glue runtime baked in.
+So wasm_zero ships ~2.2× smaller — no wasm-bindgen glue runtime baked in.
 
 Caveats (also printed by the script):
 
 - wasm_bindgen ships the `.wasm` plus a **per-module** JS glue file.
-- wasm_zero ships the `.wasm` plus a small `bindings.js`, and shares **one**
-  `rkyv-js` runtime across all modules (loaded once; from a CDN in the demo), so
-  it's excluded from the per-module total. For a single module you'd add the
-  runtime cost once; with many modules wasm_zero pulls further ahead. Measure the
-  runtime with:
-  ```bash
-  curl -s https://esm.sh/gh/cometkim/rkyv-js@2c3fc14 | gzip -9 | wc -c
-  ```
+- wasm_zero's `bindings.js` is **self-contained**: it decodes straight from wasm
+  memory with no runtime dependency. `rkyv-js` is imported *only* by modules that
+  take a **non-scalar argument** (to `r.encode` it); the benchmark has none, so
+  nothing extra ships.
 
 ## Notes
 

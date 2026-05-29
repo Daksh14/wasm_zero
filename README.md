@@ -9,9 +9,9 @@ Annotate a Rust function with `#[wasm_zero]`, and wasm_zero gives you:
 
 - an exported FFI shim that returns the function's result as an
   [rkyv](https://rkyv.org/) zero-copy archive, and
-- generated TypeScript/JavaScript bindings that call the shim and decode the
-  archive in JS using [rkyv-js](https://www.npmjs.com/package/rkyv-js) — no
-  extra serialization layer.
+- generated, **self-contained** TypeScript/JavaScript bindings that call the
+  shim and read each field straight out of wasm memory — no runtime library on
+  the read path, no extra serialization layer.
 
 ```rust
 #[wasm_zero]
@@ -32,8 +32,9 @@ For small `no_std` wasm modules that just need to hand structured data to a
 JavaScript host, that's a lot of machinery. wasm_zero takes a different tack:
 
 - The Rust side serializes return values with rkyv into a flat byte buffer.
-- The JS side reads that buffer directly with rkyv-js — the schema is derived
-  from your Rust types, so there are no hand-maintained schema files.
+- The JS side reads that buffer field-by-field straight from wasm memory, using
+  readers generated from your Rust types — no hand-maintained schema files and
+  no runtime decode library.
 - The only ABI surface is a handful of integer-in/integer-out functions plus
   linear memory.
 
@@ -48,8 +49,8 @@ JavaScript host, that's a lot of machinery. wasm_zero takes a different tack:
         │
         └── wasm_zero_build (build.rs, before compile)
               scans the source and emits pkg/bindings.{ts,js}:
-                • rkyv-js codecs   (ArchivedPerson = r.struct({...}))
-                • FFI client       (initWasmZero / wasmzero.foo())
+                • per-struct readers (decode_Person reads each field)
+                • FFI client         (initWasmZero / wasmzero.foo())
 ```
 
 A proc macro can only return tokens to the compiler — it can't write files. A
@@ -74,15 +75,16 @@ For each `#[wasm_zero] fn foo(args...) -> T`:
    no error code (it can't fail). Otherwise it writes
    `[len: u32 little-endian][rkyv archive bytes]` at `out_ptr` and returns an
    [`ErrorCode`](crates/wasm_zero/src/error.rs) (`Ok == 0`).
-4. For buffer returns, JS reads `len` and decodes from a `Uint8Array` view into
-   wasm memory (`r.decode` for structs/strings → an owned value; a typed-array
-   *view* for numeric vecs — see [Return handling](#return-handling)).
+4. For buffer returns, JS reads `len` and decodes **straight from wasm memory**
+   using a generated per-struct reader — each field read at its archived offset
+   (scalars via `DataView`, numeric vecs as zero-copy typed-array views, strings
+   transcoded on demand). No runtime library is involved on the read path.
    Scalar/unit returns are just the call's return value.
 
 Both directions use the same `[len][bytes]` framing (the archive starts at a
 16-byte-aligned offset so typed-array views are correctly aligned).
 
-rkyv is configured for the format rkyv-js expects: little-endian, aligned
+rkyv is configured for the standard v0.8 format: little-endian, aligned
 primitives, **32-bit relative pointers**, root at the end of the buffer.
 
 ## Workspace layout
@@ -91,15 +93,15 @@ primitives, **32-bit relative pointers**, root at the end of the buffer.
 |-------|------|
 | [`wasm_zero`](crates/wasm_zero) | `no_std` runtime library: the `#[wasm_zero]` re-export, `ErrorCode`, and `mem` (malloc/free + buffer helpers). |
 | [`wasm_zero_macro`](crates/wasm_zero_macro) | The `#[wasm_zero]` attribute proc macro that emits the FFI shim. |
-| [`wasm_zero_build`](crates/wasm_zero_build) | `build.rs` helper that generates the rkyv-js bindings (`bindings.ts` + `bindings.js`). |
+| [`wasm_zero_build`](crates/wasm_zero_build) | `build.rs` helper that generates the self-contained TS/JS bindings (`bindings.ts` + `bindings.js`). |
 | [`wasm_zero_serve`](crates/wasm_zero_serve) | Tiny axum static-file server for running the demo pages. |
 | [`wasm_zero_test_nostd`](crates/wasm_zero_test_nostd) | `no_std` demo: rkyv types + `#[wasm_zero]` functions + a browser page. |
 | [`wasm_zero_test`](crates/wasm_zero_test) | A `wasm-bindgen`/`std` comparison crate. |
 
 There's also a standalone [`benchmark/`](benchmark) workspace comparing
 `wasm-bindgen` and `wasm_zero` head-to-head — call overhead, data transfer, and
-**bundle size** (`benchmark/sizes.sh`: wasm_zero ships ~2× smaller gzipped, with
-no glue runtime baked in).
+**bundle size** (`benchmark/sizes.sh`: wasm_zero ships ~2.2× smaller gzipped —
+5.8 KB vs 12.8 KB — with no glue runtime and no read-path dependency at all).
 
 ## Usage
 
@@ -148,29 +150,32 @@ fn main() {
 }
 ```
 
-This produces rkyv-js codecs and the FFI client:
+This produces a **self-contained** FFI client — a TypeScript interface plus a
+zero-copy reader per struct, with no runtime dependency:
 
 ```ts
-import * as r from 'rkyv-js';
+export interface Person {
+  name: string;
+  age: number;
+  email: string | null;
+  scores: Uint32Array; // zero-copy view over wasm memory
+}
 
-export const ArchivedPerson = r.struct({
-  name: r.string,
-  age: r.u32,
-  email: r.option(r.string),
-  scores: r.vec(r.u32),
-});
-export type Person = r.Infer<typeof ArchivedPerson>;
+// reads each field straight from wasm memory at its archived offset
+function decode_Person(dv, u8, p) { /* ... */ }
 
-export async function initWasmZero(wasmUrl: string | URL, imports?: WebAssembly.Imports): Promise<...>;
+export async function initWasmZero(wasmUrl: string | URL, imports?: WebAssembly.Imports): Promise<WasmZero>;
 ```
 
 Two files are emitted from one model:
 
-- **`bindings.ts`** — idiomatic rkyv-js with `r.Infer<>` types, for
-  TypeScript / bundler consumers (`yarn add rkyv-js`).
+- **`bindings.ts`** — plain TypeScript interfaces + typed client.
 - **`bindings.js`** — the same module with types stripped, importable directly
-  in a browser (resolve the `rkyv-js` specifier via an
-  [import map](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/script/type/importmap)).
+  in a browser (no bundler, no CDN).
+
+`rkyv-js` is imported **only** if a function takes a non-scalar argument
+(`String`/struct/…) — it's used to `r.encode` the argument into the input buffer
+(hand-rolling the rkyv *writer* is out of scope). The read path never needs it.
 
 ### 4. Build the wasm and call it
 
@@ -179,14 +184,16 @@ cargo build --target wasm32-unknown-unknown -p your_crate
 ```
 
 ```html
-<script type="importmap">
-  { "imports": { "rkyv-js": "https://esm.sh/rkyv-js@latest" } }
-</script>
 <script type="module">
   import { initWasmZero } from './pkg/bindings.js';
   const wasmzero = await initWasmZero('your_crate.wasm');
   console.log(wasmzero.get_adult_person());
 </script>
+<!-- Only if a function takes a non-scalar argument, the bindings import
+     rkyv-js; add an import map then:
+     <script type="importmap">
+       { "imports": { "rkyv-js": "https://esm.sh/gh/cometkim/rkyv-js" } }
+     </script> -->
 ```
 
 ## Running the demo
@@ -234,23 +241,23 @@ faster byte copies where your targets support it.
 
 ## Supported types
 
-wasm_zero maps Rust types to rkyv-js codecs:
+wasm_zero reads these Rust types from the archive into TypeScript:
 
-| Rust | Codec | TypeScript |
-|------|-------|------------|
-| `u8`–`i32`, `f32`, `f64`, `usize`/`isize` | `r.u8` … `r.f64` | `number` |
-| `u64`, `i64` | `r.u64`, `r.i64` | `bigint` |
-| `bool` | `r.bool` | `boolean` |
-| `char`, `String`, `&str` | `r.char` / `r.string` | `string` |
-| `Vec<T>` | `r.vec(T)` | `T[]` |
-| `Option<T>` | `r.option(T)` | `T \| null` |
-| `Box<T>` / `Rc<T>` / `Arc<T>` | `r.box` / `r.rc` | `T` |
-| `[T; N]` | `r.array(T, N)` | `T[]` |
-| `(A, B, …)` | `r.tuple(A, B, …)` | `[A, B, …]` |
-| `#[derive(Archive)] struct` | `r.struct({...})` | `interface` |
+| Rust | TypeScript |
+|------|------------|
+| `u8`–`i32`, `f32`, `f64`, `usize`/`isize` | `number` |
+| `u64`, `i64` | `bigint` |
+| `bool` | `boolean` |
+| `char`, `String` | `string` |
+| `Vec<T>` of a numeric primitive | `Uint32Array` / `Float64Array` / … (zero-copy view) |
+| `Vec<T>` (other) | `T[]` |
+| `Option<T>` | `T \| null` |
+| `Box<T>` / `Rc<T>` / `Arc<T>` | `T` |
+| `#[derive(Archive)] struct` | `interface` |
 
-For the full codec catalogue (enums, maps, external crate types), see the
-[rkyv-js](https://www.npmjs.com/package/rkyv-js) docs.
+Enums, maps, tuples, and `[T; N]` arrays aren't read yet (the build fails with a
+clear message). The reader is generated from the rkyv archived layout; for the
+non-scalar **argument** path, encoding uses [rkyv-js](https://github.com/cometkim/rkyv-js).
 
 ### Argument handling
 
@@ -266,37 +273,41 @@ wasm_zero picks the cheapest way to pass arguments based on their types:
 
 ### Return handling
 
-Likewise for return values:
+Return values are read **straight from wasm memory** by a generated per-struct
+reader (`decode_<Struct>`) — each field at its archived offset, no runtime
+library:
 
 | Return type | How it crosses | Result |
 |-------------|----------------|--------|
 | scalar primitive or `()` | **returned directly** as the wasm function's value — a bare call, no buffer (matches wasm_bindgen) | `number` / `bigint` / `boolean` / `void` |
-| `Vec<T>` of a numeric primitive | **zero-copy typed-array view** (`Uint32Array`, `Float64Array`, …) straight over the archived elements | a view that **aliases** wasm memory |
-| struct / `String` / `Option` / other | eagerly decoded with `r.decode` | an **owned** JS value (a copy) |
+| `Vec<T>` of a numeric primitive | **zero-copy typed-array view** (`Uint32Array`, `Float64Array`, …) over the archived elements | a view that **aliases** wasm memory |
+| struct / `String` / `Option` / `Vec<T>` / nested | fields read directly at their offsets (`DataView`/views; strings transcoded) | a plain object; numeric-vec fields are views |
 
 Notes:
 
-- The numeric-vec **view aliases the shared scratch buffer**, so it's only valid
-  until the next call on that instance (or a `memory.grow`). `.slice()` it if you
-  need to keep it.
-- Eagerly decoded values are **owned copies** — safe to keep across later calls.
+- **Views alias the shared scratch buffer**, so a returned struct's numeric-vec
+  field (or a top-level numeric-vec return) is only valid until the next call on
+  that instance (or a `memory.grow`). `.slice()` / copy it to keep it. Scalar and
+  string fields are owned (copied) and safe to keep.
 - The rkyv layout for numeric vecs is native little-endian, so the view needs no
   copy and no per-element decode. Strings are always materialized (UTF-8 →
-  UTF-16).
+  UTF-16) when read.
 
 This is why, in the [benchmark](benchmark), `wasm_zero` matches or beats
-wasm_bindgen on scalar calls and numeric-array returns, and trails it only on
-full struct materialization.
+wasm_bindgen on scalar calls and numeric-array returns; for full struct
+materialization with strings, serde-wasm-bindgen's single-pass build is still
+a touch faster, while wasm_zero wins when you read only some fields.
 
 ## Limitations
 
 - Arguments must be **owned** rkyv types (e.g. `i32`, `String`, a `#[derive(Archive)]`
   struct) — borrowed parameters like `&str` aren't decodable from the input
-  buffer.
-- Only the default rkyv v0.8 format is supported (little-endian, aligned,
-  32-bit pointers), matching rkyv-js.
-- Enums and map types are generated by the underlying rkyv-js codec set but are
-  not yet exercised by wasm_zero's own demos.
+  buffer. Non-scalar arguments require `rkyv-js` (for encoding).
+- The generated readers cover scalars, `String`, `Option`, `Vec`, `Box`/`Rc`/`Arc`,
+  and `#[derive(Archive)]` structs. Enums, maps, and tuples aren't read yet
+  (the build fails with a clear message).
+- Only the standard rkyv v0.8 format is supported (little-endian, aligned,
+  32-bit pointers).
 
 ## License
 
