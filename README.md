@@ -27,6 +27,19 @@ const person = wasmzero.get_adult_person(); // -> { name, age, email, scores }
 
 ## Why
 
+### Motivation
+
+This library exists to enable and skyrocket WASM application development that
+touches the frontend — and to make the web a faster and more secure place. Rust
+compiled to WASM gives you memory safety and near-native speed; wasm_zero
+removes the friction of getting that power to the browser. You annotate a Rust
+function, and wasm_zero emits a JavaScript/TypeScript shim you can drop straight
+into a bare `.html` file — no bundler, no glue runtime, no `std` assumption. The
+same shim works on a server or inside a [Spin](https://www.fermyon.com/spin)
+Fermyon edge container, so one model spans the browser, the edge, and the
+backend. The less machinery between Rust and the host, the smaller, faster, and
+easier to audit the result — which is the whole point.
+
 `wasm-bindgen` is excellent but pulls in a JS glue runtime and assumes `std`.
 For small `no_std` wasm modules that just need to hand structured data to a
 JavaScript host, that's a lot of machinery. wasm_zero takes a different tack:
@@ -37,6 +50,25 @@ JavaScript host, that's a lot of machinery. wasm_zero takes a different tack:
   no runtime decode library.
 - The only ABI surface is a handful of integer-in/integer-out functions plus
   linear memory.
+
+## At Dusk Network: exu
+
+At [Dusk Network](https://dusk.network/) we engineered a glue layer that runs on
+`no_std`, is secure and sandboxed, and executes efficiently in the browser
+*without blocking* the main thread by running inside Web Workers — alongside
+wasm_zero.
+
+That runtime is [`exu`](https://github.com/dusk-network/exu). It works in the
+web browser or the Node.js runtime to run your WASM with:
+
+- **Web Workers** in the browser and **actual OS-level threads** in Node.js, so
+  invocations run off the main thread, non-blockingly.
+- **Sandboxing** — your WASM runs isolated. After a function invocation exu can
+  delete the WASM memory and drop the worker entirely, so nothing leaks between
+  calls.
+
+Today exu supports running WASM inside sandboxed Web Workers; more features are
+on the way.
 
 ## How it works
 
