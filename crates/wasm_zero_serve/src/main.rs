@@ -29,11 +29,13 @@ async fn main() {
     println!("test pages:");
     println!("  http://{addr}/crates/wasm_zero_test/index.html");
     println!("  http://{addr}/crates/wasm_zero_test_nostd/index.html");
+    println!("  http://{addr}/crates/wasm_zero_test_canvas/index.html  (GPU-style compute → canvas)");
     println!("  http://{addr}/benchmark/web/index.html  (wasm_bindgen vs wasm_zero)");
     println!();
     println!("build the wasm first if you haven't:");
     println!("  cargo build --target wasm32-unknown-unknown -p wasm_zero_test");
     println!("  cargo build --target wasm32-unknown-unknown -p wasm_zero_test_nostd");
+    println!("  cargo build --release --target wasm32-unknown-unknown -p wasm_zero_test_canvas");
     println!("  ./benchmark/build.sh");
 
     axum::serve(listener, app).await.expect("server crashed");

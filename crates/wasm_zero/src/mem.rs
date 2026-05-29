@@ -32,7 +32,11 @@ pub const HEADER: usize = 16;
 /// payload. The shim serializes directly into this region, so it bounds the
 /// largest value a `#[wasm_zero]` function may return. Must match
 /// `MAX_BUFFER_SIZE` in the generated JS bindings.
-pub const MAX_BUFFER_SIZE: usize = 64 * 1024;
+///
+/// 512 KiB is large enough to hold a 320×240 RGBA frame (≈300 KiB) for the
+/// canvas demo with headroom; small returns are unaffected (the scratch buffer
+/// is malloc'd once).
+pub const MAX_BUFFER_SIZE: usize = 512 * 1024;
 
 #[unsafe(no_mangle)]
 pub fn malloc(len: u32) -> u32 {

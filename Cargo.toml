@@ -10,6 +10,7 @@ members = [
     "crates/wasm_zero_serve",
     "crates/wasm_zero_test",
     "crates/wasm_zero_test_nostd",
+    "crates/wasm_zero_test_canvas",
 ]
 # The test crates target wasm32-unknown-unknown only — keep them out of the
 # default host build so `cargo build` from the workspace root doesn't try

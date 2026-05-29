@@ -821,6 +821,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm_zero_test_canvas"
+version = "0.1.0"
+dependencies = [
+ "dlmalloc",
+ "rkyv",
+ "wasm_zero",
+ "wasm_zero_build",
+]
+
+[[package]]
 name = "wasm_zero_test_nostd"
 version = "0.1.0"
 dependencies = [

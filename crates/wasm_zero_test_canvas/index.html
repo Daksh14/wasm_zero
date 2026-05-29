@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>wasm_zero — GPU-style compute → canvas</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 48rem; }
+    h1 { font-size: 1.4rem; }
+    p { color: #444; line-height: 1.5; }
+    code { background: #f4f4f5; padding: 0 .25rem; border-radius: 4px; }
+    /* The wasm renders at native resolution; CSS scales it up crisply. */
+    canvas {
+      width: 640px; height: 480px;
+      image-rendering: pixelated;
+      border-radius: 8px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.25);
+      background: #000;
+    }
+    #stats { margin-top: .75rem; font-variant-numeric: tabular-nums; color: #0a7d2c; }
+    .err { color: #b00020; }
+  </style>
+</head>
+<body>
+  <h1>wasm_zero: heavy compute in Rust → zero-copy pixels → canvas</h1>
+  <p>
+    Each frame, Rust (in <code>wasm32-unknown-unknown</code>, <code>#![no_std]</code>)
+    iterates <code>z = z² + c</code> for every pixel — an animated Julia set — and
+    stamps <strong>HELLO WORLD</strong> on top. The RGBA buffer is returned through
+    <code>wasm_zero</code> as a <code>Uint8Array</code> <em>view</em> over wasm memory
+    (no copy on the read side), then blitted with <code>putImageData</code>.
+  </p>
+  <canvas id="c"></canvas>
+  <div id="stats">loading…</div>
+
+  <script type="module">
+    import { initWasmZero } from './pkg/bindings.js';
+
+    // Release build is strongly recommended — the per-pixel loop is heavy.
+    const WASM_URL = '../../target/wasm32-unknown-unknown/release/wasm_zero_test_canvas.wasm';
+
+    const stats = document.getElementById('stats');
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+
+    try {
+      const wz = await initWasmZero(WASM_URL);
+
+      // Dimensions come straight from wasm (scalar fast-path exports).
+      const W = wz.width(), H = wz.height();
+      canvas.width = W;
+      canvas.height = H;
+      const img = ctx.createImageData(W, H);
+
+      let frames = 0, last = performance.now(), fps = 0;
+
+      function frame(now) {
+        const t = now / 1000;
+        // The classic animated Julia constant c = 0.7885·e^{iθ}.
+        // JS does the cheap trig; Rust does the expensive iteration.
+        const theta = t * 0.4;
+        const cx = 0.7885 * Math.cos(theta);
+        const cy = 0.7885 * Math.sin(theta);
+
+        // Zero-copy: `pixels` is a Uint8Array view aliasing wasm memory, valid
+        // only until the next wasm call — so copy it into the canvas-owned
+        // ImageData immediately (the single unavoidable copy at the boundary).
+        const pixels = wz.render(cx, cy);
+        img.data.set(pixels);
+        ctx.putImageData(img, 0, 0);
+
+        frames++;
+        if (now - last >= 500) {
+          fps = Math.round((frames * 1000) / (now - last));
+          frames = 0; last = now;
+          stats.textContent =
+            `${W}×${H} · ${(W * H).toLocaleString()} px · z=z²+c × ${fps} fps`;
+        }
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    } catch (err) {
+      stats.className = 'err';
+      stats.textContent = `failed to load wasm: ${err}`;
+      console.error(err);
+    }
+  </script>
+</body>
+</html>

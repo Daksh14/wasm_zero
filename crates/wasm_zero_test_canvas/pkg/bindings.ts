@@ -37,22 +37,13 @@ function rdVecOf(dv, u8, a, stride, rd) {
 }
 
 // ---- per-struct field readers ----
-function decode_Person(dv, u8, p) {
-  return {
-    name: rdStr(dv, u8, p + 0),
-    age: dv.getUint32(p + 8, true),
-    email: (u8[p + 12] === 0 ? null : rdStr(dv, u8, p + 12 + 4)),
-    scores: rdVec(dv, p + 24, Uint32Array),
-  };
-}
-
-export function bindWasmZero(wasm) {
+export function bindWasmZero(wasm: any) {
   const outPtr = wasm.malloc(HEADER + MAX_BUFFER_SIZE);
   let inPtr = 0; // lazily allocated for non-scalar args
   let buf = wasm.memory.buffer, dv = new DataView(buf), u8 = new Uint8Array(buf);
   function views() { if (buf !== wasm.memory.buffer) { buf = wasm.memory.buffer; dv = new DataView(buf); u8 = new Uint8Array(buf); } }
 
-  function invoke(shim, argCodec, argValue, directArgs) {
+  function invoke(shim: string, argCodec: any, argValue: any, directArgs: any) {
     if (directArgs !== null) return wasm[shim](...directArgs, outPtr);
     if (argCodec === null) return wasm[shim](outPtr);
              throw new Error('unreachable: no non-scalar args');
@@ -61,7 +52,7 @@ export function bindWasmZero(wasm) {
   // Run the shim, then read the result straight from wasm memory at the
   // archive root. Struct/vec results alias the scratch buffer — valid
   // until the next call (or memory.grow); copy if you need to keep them.
-  function call(shim, size, read, argCodec, argValue, directArgs) {
+  function call(shim: string, size: number, read: any, argCodec: any, argValue: any, directArgs: any) {
     const code = invoke(shim, argCodec, argValue, directArgs);
     if (code !== ErrorCode.Ok) throw new WasmError(code);
     views();
@@ -71,12 +62,13 @@ export function bindWasmZero(wasm) {
 
   return {
     wasm,
-    get_adult_person() { return call("__wasm_zero_get_adult_person", 32, (dv, u8, p) => decode_Person(dv, u8, p), null, null, null); },
-    greet() { return call("__wasm_zero_greet", 8, (dv, u8, p) => rdStr(dv, u8, p), null, null, null); },
+    width(): number { return wasm["__wasm_zero_width"](); },
+    height(): number { return wasm["__wasm_zero_height"](); },
+    render(cx: number, cy: number): Uint8Array { return call("__wasm_zero_render", 8, (dv, u8, p) => rdVec(dv, p, Uint8Array), null, null, [cx, cy]); },
   };
 }
 
-export async function initWasmZero(wasmUrl, imports) {
+export async function initWasmZero(wasmUrl: string | URL, imports?: WebAssembly.Imports) {
   const importObject =
     imports ?? new Proxy({}, { get: () => new Proxy({}, { get: () => () => {} }) });
   const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), importObject);

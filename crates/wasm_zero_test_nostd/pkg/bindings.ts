@@ -10,7 +10,7 @@ export class WasmError extends Error {
   }
 }
 
-export const MAX_BUFFER_SIZE = 64 * 1024;
+export const MAX_BUFFER_SIZE = 512 * 1024;
 const HEADER = 16; // archive offset; must match wasm_zero::mem::HEADER
 
 // ---- zero-copy readers (read straight from wasm memory) ----

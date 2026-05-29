@@ -37,15 +37,6 @@ function rdVecOf(dv, u8, a, stride, rd) {
 }
 
 // ---- per-struct field readers ----
-function decode_Person(dv, u8, p) {
-  return {
-    name: rdStr(dv, u8, p + 0),
-    age: dv.getUint32(p + 8, true),
-    email: (u8[p + 12] === 0 ? null : rdStr(dv, u8, p + 12 + 4)),
-    scores: rdVec(dv, p + 24, Uint32Array),
-  };
-}
-
 export function bindWasmZero(wasm) {
   const outPtr = wasm.malloc(HEADER + MAX_BUFFER_SIZE);
   let inPtr = 0; // lazily allocated for non-scalar args
@@ -71,8 +62,9 @@ export function bindWasmZero(wasm) {
 
   return {
     wasm,
-    get_adult_person() { return call("__wasm_zero_get_adult_person", 32, (dv, u8, p) => decode_Person(dv, u8, p), null, null, null); },
-    greet() { return call("__wasm_zero_greet", 8, (dv, u8, p) => rdStr(dv, u8, p), null, null, null); },
+    width() { return wasm["__wasm_zero_width"](); },
+    height() { return wasm["__wasm_zero_height"](); },
+    render(cx, cy) { return call("__wasm_zero_render", 8, (dv, u8, p) => rdVec(dv, p, Uint8Array), null, null, [cx, cy]); },
   };
 }
 

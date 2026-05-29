@@ -1,0 +1,15 @@
+[package]
+name = "wasm_zero_test_canvas"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm_zero.workspace = true
+dlmalloc = { version = "0.2", features = ["global"] }
+rkyv.workspace = true
+
+[build-dependencies]
+wasm_zero_build.workspace = true

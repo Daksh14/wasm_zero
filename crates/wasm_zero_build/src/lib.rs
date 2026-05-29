@@ -398,7 +398,7 @@ fn render_module(typed: bool, structs: &StructMap, funcs: &[&ItemFn]) -> String 
          \x20   this.code = code;\n\
          \x20 }\n\
          }\n\n\
-         export const MAX_BUFFER_SIZE = 64 * 1024;\n\
+         export const MAX_BUFFER_SIZE = 512 * 1024;\n\
          const HEADER = 16; // archive offset; must match wasm_zero::mem::HEADER\n\n\
          // ---- zero-copy readers (read straight from wasm memory) ----\n\
          const __td = new TextDecoder();\n\
