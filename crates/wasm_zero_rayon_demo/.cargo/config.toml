@@ -1,0 +1,37 @@
+# Threaded wasm needs std itself rebuilt with the atomics ABI, so this crate
+# leans on -Z build-std (nightly, pinned by the workspace rust-toolchain.toml).
+#
+# cargo discovers config from the cwd upward and a closer file *replaces*
+# (does not append to) a parent's `rustflags`, so this file repeats every flag
+# rather than relying on the workspace-root .cargo/config.toml.
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+    # +atomics / +bulk-memory: emit atomic memory ops + memory.init/copy.
+    # +mutable-globals: required so thread-local globals can be shared/mutated.
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+    # Link a SHARED memory and import it from JS, so every Worker that
+    # instantiates this module aliases the exact same linear memory. Without
+    # --shared-memory lld refuses to link a module that uses atomics; without a
+    # --max-memory bound a shared memory is invalid.
+    "-C", "link-arg=--shared-memory",
+    "-C", "link-arg=--import-memory",
+    "-C", "link-arg=--max-memory=1073741824",
+    # Export the stack-pointer global so each helper Worker can point its
+    # instance at a *private* stack region before running any Rust (wasm
+    # globals are per-instance, so every instance otherwise shares the default
+    # 1 MiB stack and they'd clobber each other). Needs +mutable-globals (set
+    # above) for a mutable global export to be legal.
+    "-C", "link-arg=--export=__stack_pointer",
+    # Threads + unwinding don't mix on wasm; abort instead.
+    "-C", "panic=abort",
+]
+
+[unstable]
+# Rebuild std (+ panic_abort) with the atomics target-features above.
+build-std = ["std", "panic_abort"]
+# Make any panic compile down to a trap; keeps the module small and avoids
+# pulling the unwinder into a panic=abort build.
+build-std-features = ["panic_immediate_abort"]

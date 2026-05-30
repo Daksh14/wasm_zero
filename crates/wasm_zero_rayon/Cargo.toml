@@ -1,0 +1,18 @@
+[package]
+name = "wasm_zero_rayon"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm_zero.workspace = true
+rkyv.workspace = true
+rayon = "1"
+# The rayon-over-shared-memory thread-pool bootstrap (shared with the demo
+# crate). This crate just adds the parallel compute fns + thin FFI wrappers.
+wasm_zero_rayon_pool = { path = "../wasm_zero_rayon_pool" }
+
+[build-dependencies]
+wasm_zero_build.workspace = true

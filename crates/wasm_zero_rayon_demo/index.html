@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>wasm_zero + rayon — parallel Mandelbrot (via exu)</title>
+    <style>
+      body {
+        font:
+          14px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        margin: 2rem auto;
+        max-width: 44rem;
+        padding: 0 1rem;
+        color: #ddd;
+        background: #111;
+      }
+      h1 {
+        font-size: 1.05rem;
+      }
+      canvas {
+        display: block;
+        margin: 1rem 0;
+        border: 1px solid #333;
+        max-width: 100%;
+        image-rendering: pixelated;
+      }
+      button {
+        font: inherit;
+        padding: 0.5rem 1rem;
+        margin-right: 0.5rem;
+        cursor: pointer;
+        background: #2a2a2a;
+        color: #eee;
+        border: 1px solid #444;
+        border-radius: 6px;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #status {
+        margin-top: 0.75rem;
+        min-height: 1.5rem;
+      }
+      .warn {
+        color: #e6a23c;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Parallel Mandelbrot — wasm_zero + rayon, sandboxed via exu</h1>
+    <p>
+      The fractal is computed in WebAssembly with rayon. "Single thread" runs it
+      on one worker; "Multi thread" spreads the rows across
+      <code>navigator.hardwareConcurrency</code> workers sharing one linear
+      memory. The RGBA result is read zero-copy from shared memory and blitted to
+      the canvas. Workers are pooled/reused; the wasm memory is dropped per run.
+    </p>
+
+    <button id="single" disabled>Single thread</button>
+    <button id="multi" disabled>Multi thread</button>
+    <div id="status"></div>
+    <canvas id="canvas" width="600" height="600"></canvas>
+
+    <script type="module">
+      import { Module } from "../../exu/src/mod.js";
+
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const statusEl = document.getElementById("status");
+      const singleBtn = document.getElementById("single");
+      const multiBtn = document.getElementById("multi");
+
+      const W = canvas.width;
+      const H = canvas.height;
+      const MAX_ITER = 1000;
+      const cores = navigator.hardwareConcurrency || 4;
+
+      multiBtn.textContent = `Multi thread (${cores})`;
+
+      const module = new Module(
+        new URL(
+          "../../target/wasm32-unknown-unknown/release/wasm_zero_rayon_demo.wasm",
+          import.meta.url,
+        ),
+      );
+      module.defaultImports = new URL("./imports.js", import.meta.url);
+
+      if (self.crossOriginIsolated === false) {
+        statusEl.innerHTML =
+          '<span class="warn">Not cross-origin isolated — serve with COOP/COEP (wasm_zero_serve does). Multi-thread will fail.</span>';
+      }
+
+      // Render with `threads` rayon threads; returns {imageData, ms, threads}.
+      const render = (threads) =>
+        module.task(async (exports, { memory, initThreadPool }) => {
+          const used = await initThreadPool(threads);
+          const t0 = performance.now();
+          const ptr = await exports.__wasm_zero_mandelbrot(W, H, MAX_ITER);
+          const ms = performance.now() - t0;
+          // Copy out of shared memory (sandbox drops it after the task).
+          const data = new Uint8ClampedArray(W * H * 4);
+          data.set(new Uint8Array(memory.buffer, ptr, W * H * 4));
+          return { imageData: new ImageData(data, W, H), ms, threads: used };
+        })();
+
+      const run = async (label, threads) => {
+        singleBtn.disabled = multiBtn.disabled = true;
+        statusEl.textContent = `${label}: rendering…`;
+        try {
+          const { imageData, ms, threads: used } = await render(threads);
+          ctx.putImageData(imageData, 0, 0);
+          statusEl.textContent = `${label}: ${used} thread(s), ${ms.toFixed(1)} ms`;
+        } catch (err) {
+          statusEl.innerHTML = `<span class="warn">error: ${err?.message ?? err}</span>`;
+        } finally {
+          singleBtn.disabled = multiBtn.disabled = false;
+        }
+      };
+
+      singleBtn.addEventListener("click", () => run("Single thread", 1));
+      multiBtn.addEventListener("click", () => run("Multi thread", cores));
+
+      // Enable once the module is compiled, and draw an initial frame.
+      singleBtn.disabled = multiBtn.disabled = false;
+      run("Multi thread", cores);
+    </script>
+  </body>
+</html>

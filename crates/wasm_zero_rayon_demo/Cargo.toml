@@ -1,0 +1,16 @@
+[package]
+name = "wasm_zero_rayon_demo"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm_zero.workspace = true
+rayon = "1"
+# Shared rayon-over-shared-memory bootstrap (see wasm_zero_rayon_pool).
+wasm_zero_rayon_pool = { path = "../wasm_zero_rayon_pool" }
+
+[build-dependencies]
+wasm_zero_build.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "wasm_zero_rayon_pool"
+version.workspace = true
+edition.workspace = true
+
+# A plain lib (not cdylib): it provides the rayon-over-shared-memory thread-pool
+# bootstrap logic that cdylib crates wrap with thin #[no_mangle] exports. The
+# wrappers must live in the cdylib root, since #[no_mangle] symbols in a
+# dependency rlib get GC'd by the wasm linker unless referenced/exported.
+
+[dependencies]
+wasm_zero.workspace = true
+rayon = "1"
+crossbeam-channel = "0.5"

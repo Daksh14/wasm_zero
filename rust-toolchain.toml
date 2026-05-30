@@ -1,0 +1,7 @@
+[toolchain]
+# Needs edition-2024 (stable since 1.85) AND -Z build-std for the threaded
+# wasm crate; nightly-2024-08-02 was too old for edition 2024. rust-src is
+# required so build-std can recompile std with the atomics target-feature.
+channel = "nightly-2025-08-21"
+components = ["rust-src"]
+targets = ["wasm32-unknown-unknown"]

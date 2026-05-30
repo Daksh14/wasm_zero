@@ -1,8 +1,9 @@
 [workspace]
 resolver = "3"
 # benchmark/ is its own workspace so the heavy wasm-bindgen/web-sys deps stay
-# out of the core build.
-exclude = ["benchmark"]
+# out of the core build. exu/ is a separate cloned repo (its own git + example
+# crate), so keep it out of this workspace entirely.
+exclude = ["benchmark", "exu"]
 members = [
     "crates/wasm_zero",
     "crates/wasm_zero_macro",
@@ -11,6 +12,9 @@ members = [
     "crates/wasm_zero_test",
     "crates/wasm_zero_test_nostd",
     "crates/wasm_zero_test_canvas",
+    "crates/wasm_zero_rayon_pool",
+    "crates/wasm_zero_rayon",
+    "crates/wasm_zero_rayon_demo",
 ]
 # The test crates target wasm32-unknown-unknown only — keep them out of the
 # default host build so `cargo build` from the workspace root doesn't try

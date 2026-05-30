@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>wasm_zero + rayon (shared-memory threads via exu)</title>
+    <style>
+      body {
+        font:
+          14px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+        margin: 2rem auto;
+        max-width: 46rem;
+        padding: 0 1rem;
+        color: #ddd;
+        background: #111;
+      }
+      h1 {
+        font-size: 1.1rem;
+      }
+      button {
+        font: inherit;
+        padding: 0.5rem 1rem;
+        cursor: pointer;
+        background: #2a2a2a;
+        color: #eee;
+        border: 1px solid #444;
+        border-radius: 6px;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #log {
+        white-space: pre-wrap;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 1rem;
+        margin-top: 1rem;
+        min-height: 12rem;
+      }
+      .warn {
+        color: #e6a23c;
+      }
+      .ok {
+        color: #67c23a;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>wasm_zero + rayon — shared-memory threads, sandboxed via exu</h1>
+    <p>
+      Counts primes below 1,000,000 in WebAssembly, first single-threaded, then
+      across a rayon pool of <code>navigator.hardwareConcurrency</code> threads
+      sharing one linear memory. Workers are pooled and reused; the wasm memory
+      is dropped between runs (the sandbox boundary).
+    </p>
+    <button id="run">Run benchmark</button>
+    <div id="log"></div>
+
+    <script type="module">
+      import { Module } from "../../exu/src/mod.js";
+
+      const logEl = document.getElementById("log");
+      const runBtn = document.getElementById("run");
+      const log = (msg, cls = "") =>
+        (logEl.innerHTML += `<span class="${cls}">${msg}</span>\n`);
+
+      const N = 1_000_000;
+      const WASM_URL = new URL(
+        "../../target/wasm32-unknown-unknown/release/wasm_zero_rayon.wasm",
+        import.meta.url,
+      );
+
+      const module = new Module(WASM_URL);
+      module.defaultImports = new URL("./imports.js", import.meta.url);
+
+      if (self.crossOriginIsolated === false) {
+        log(
+          "Not cross-origin isolated — serve with COOP/COEP headers (wasm_zero_serve does).",
+          "warn",
+        );
+      }
+
+      // Run `count_primes(N)` with `threads` rayon threads and time it.
+      const bench = (threads) =>
+        module.task(async (exports, { initThreadPool }) => {
+          await initThreadPool(threads);
+          const t0 = performance.now();
+          const primes = await exports.__wasm_zero_parallel_count_primes(N);
+          const ms = performance.now() - t0;
+          return { primes, ms };
+        })();
+
+      runBtn.addEventListener("click", async () => {
+        runBtn.disabled = true;
+        logEl.innerHTML = "";
+        try {
+          const cores = navigator.hardwareConcurrency || 4;
+          log(`hardwareConcurrency = ${cores}`);
+
+          log("\nsingle-threaded (1 thread)…");
+          const one = await bench(1);
+          log(`  primes = ${one.primes.toLocaleString()}`);
+          log(`  time   = ${one.ms.toFixed(1)} ms`);
+
+          log(`\nmulti-threaded (${cores} threads)…`);
+          const many = await bench(cores);
+          log(`  primes = ${many.primes.toLocaleString()}`);
+          log(`  time   = ${many.ms.toFixed(1)} ms`);
+
+          const correct = one.primes === many.primes;
+          const speedup = one.ms / many.ms;
+          log(
+            `\ncorrect: ${correct}   speedup: ${speedup.toFixed(2)}×`,
+            correct ? "ok" : "warn",
+          );
+
+          // Second run proves workers are reused (fresh memory, no respawn).
+          log("\nre-running multi-threaded (reuses pooled workers)…");
+          const again = await bench(cores);
+          log(`  time   = ${again.ms.toFixed(1)} ms`, "ok");
+        } catch (err) {
+          log(`\nerror: ${err?.stack ?? err}`, "warn");
+        } finally {
+          runBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

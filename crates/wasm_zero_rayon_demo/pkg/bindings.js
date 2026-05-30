@@ -37,13 +37,13 @@ function rdVecOf(dv, u8, a, stride, rd) {
 }
 
 // ---- per-struct field readers ----
-export function bindWasmZero(wasm: any) {
+export function bindWasmZero(wasm) {
   const outPtr = wasm.malloc(HEADER + MAX_BUFFER_SIZE);
   let inPtr = 0; // lazily allocated for non-scalar args
   let buf = wasm.memory.buffer, dv = new DataView(buf), u8 = new Uint8Array(buf);
   function views() { if (buf !== wasm.memory.buffer) { buf = wasm.memory.buffer; dv = new DataView(buf); u8 = new Uint8Array(buf); } }
 
-  function invoke(shim: string, argCodec: any, argValue: any, directArgs: any) {
+  function invoke(shim, argCodec, argValue, directArgs) {
     if (directArgs !== null) return wasm[shim](...directArgs, outPtr);
     if (argCodec === null) return wasm[shim](outPtr);
              throw new Error('unreachable: no non-scalar args');
@@ -52,7 +52,7 @@ export function bindWasmZero(wasm: any) {
   // Run the shim, then read the result straight from wasm memory at the
   // archive root. Struct/vec results alias the scratch buffer — valid
   // until the next call (or memory.grow); copy if you need to keep them.
-  function call(shim: string, size: number, read: any, argCodec: any, argValue: any, directArgs: any) {
+  function call(shim, size, read, argCodec, argValue, directArgs) {
     const code = invoke(shim, argCodec, argValue, directArgs);
     if (code !== ErrorCode.Ok) throw new WasmError(code);
     views();
@@ -62,13 +62,11 @@ export function bindWasmZero(wasm: any) {
 
   return {
     wasm,
-    width(): number { return wasm["__wasm_zero_width"](); },
-    height(): number { return wasm["__wasm_zero_height"](); },
-    render(mouse_x: number, mouse_y: number, mouse_down: number, orbit_cx: number, orbit_cy: number): Uint8Array { return call("__wasm_zero_render", 8, (dv, u8, p) => rdVec(dv, p, Uint8Array), null, null, [mouse_x, mouse_y, mouse_down, orbit_cx, orbit_cy]); },
+    mandelbrot(width, height, max_iter) { return wasm["__wasm_zero_mandelbrot"](width, height, max_iter); },
   };
 }
 
-export async function initWasmZero(wasmUrl: string | URL, imports?: WebAssembly.Imports) {
+export async function initWasmZero(wasmUrl, imports) {
   const importObject =
     imports ?? new Proxy({}, { get: () => new Proxy({}, { get: () => () => {} }) });
   const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), importObject);
