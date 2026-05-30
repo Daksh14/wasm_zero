@@ -67,8 +67,52 @@ web browser or the Node.js runtime to run your WASM with:
   delete the WASM memory and drop the worker entirely, so nothing leaks between
   calls.
 
-Today exu supports running WASM inside sandboxed Web Workers; more features are
-on the way.
+We maintain a **fork of exu** (vendored in [`exu/`](exu)) that extends upstream
+with a [**rayon**](https://github.com/rayon-rs/rayon) thread pool running over
+*shared* wasm memory — no `wasm-bindgen` required. The fork keeps exu's
+sandboxing model intact: the sandbox boundary is the *wasm instance + memory*,
+not the worker. Workers are pooled and reused across tasks, while a **fresh
+`WebAssembly.Memory` is minted per task** so nothing leaks between
+invocations — yet *within* a task, the rayon pool's worker threads all share
+that one memory for zero-copy parallelism (`SharedArrayBuffer` + atomics).
+
+### Example: sandboxing + a shared-memory rayon pool
+
+Each `module.task(...)` runs in its own sandbox over fresh memory (terminated
+when the task resolves). Inside the task, `initThreadPool(threads)` stands up a
+rayon pool whose workers share that sandbox's memory, so a parallel compute call
+fans out across cores without copying:
+
+```js
+import { Module } from "./exu/src/mod.js";
+
+const module = new Module(new URL("wasm_zero_rayon.wasm", import.meta.url));
+module.defaultImports = new URL("imports.js", import.meta.url);
+
+// Run a task: fresh sandbox + memory, dropped when this resolves (sandboxing).
+const result = await module.task(async (exports, { initThreadPool }) => {
+  // Spin up a rayon pool over this sandbox's shared memory.
+  const threads = await initThreadPool(navigator.hardwareConcurrency);
+  const primes = await exports.__wasm_zero_parallel_count_primes(1_000_000);
+  return { primes, threads };
+})();
+
+console.log(result); // { primes: 78498, threads: <cores> }
+```
+
+The next `module.task(...)` gets a brand-new memory (sandboxed), while the
+underlying workers are recycled from the pool. The
+[`wasm_zero_rayon`](crates/wasm_zero_rayon) crate provides the compute functions
+and the thread-pool bootstrap; see
+[`exu/tests/rayon_deno_test.mjs`](exu/tests/rayon_deno_test.mjs) for the
+end-to-end run (verified under Deno, ~3.8× on 10 threads) and
+[`exu/tests/mandelbrot_deno_test.mjs`](exu/tests/mandelbrot_deno_test.mjs) for a
+parallel Mandelbrot render that reads the RGBA buffer straight out of shared
+memory.
+
+> **Note:** shared memory needs cross-origin isolation —
+> `wasm_zero_serve` stamps `COOP`/`COEP` on every response so
+> `SharedArrayBuffer` is available in the browser.
 
 ## How it works
 
@@ -129,6 +173,8 @@ primitives, **32-bit relative pointers**, root at the end of the buffer.
 | [`wasm_zero_serve`](crates/wasm_zero_serve) | Tiny axum static-file server for running the demo pages. |
 | [`wasm_zero_test_nostd`](crates/wasm_zero_test_nostd) | `no_std` demo: rkyv types + `#[wasm_zero]` functions + a browser page. |
 | [`wasm_zero_test`](crates/wasm_zero_test) | A `wasm-bindgen`/`std` comparison crate. |
+| [`wasm_zero_rayon`](crates/wasm_zero_rayon) | Shared-memory rayon compute fns (`parallel_count_primes`, …) + the thread-pool bootstrap, driven by the exu fork. |
+| [`wasm_zero_rayon_demo`](crates/wasm_zero_rayon_demo) | Parallel Mandelbrot render over shared wasm memory (returns an RGBA pointer JS reads zero-copy). |
 
 There's also a standalone [`benchmark/`](benchmark) workspace comparing
 `wasm-bindgen` and `wasm_zero` head-to-head — call overhead, data transfer, and
