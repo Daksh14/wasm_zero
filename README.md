@@ -5,6 +5,8 @@ serialization wrapper between TypeScript and Rust. Built for **`no_std`** wasm
 targets — no `wasm-bindgen`, no JS glue runtime, no allocator assumptions beyond
 your own.
 
+🌐 **Live demo:** https://daksh14.github.io/wasm_zero/
+
 Annotate a Rust function with `#[wasm_zero]`, and wasm_zero gives you:
 
 - an exported FFI shim that returns the function's result as an
