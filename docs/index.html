@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>wasm_zero — live demos</title>
+
+    <!-- Cross-origin isolation for the rayon demo's SharedArrayBuffer.
+         GitHub Pages can't send COOP/COEP headers, so this service worker
+         injects them and reloads once. Must load before anything else. -->
+    <script src="./coi-serviceworker.js"></script>
+
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin: 0;
+        color: #ddd;
+        background: #0d0e12;
+      }
+      header {
+        padding: 1.5rem 1.5rem 0;
+        max-width: 60rem;
+        margin: 0 auto;
+      }
+      h1 { font-size: 1.2rem; margin: 0 0 .25rem; }
+      header p { color: #9aa0ad; margin: 0 0 1rem; }
+      header a { color: #6ea8fe; }
+      main { max-width: 60rem; margin: 0 auto; padding: 0 1.5rem 3rem; }
+
+      /* tabs */
+      .tabs { display: flex; gap: .25rem; border-bottom: 1px solid #2a2d36; margin-bottom: 1.5rem; }
+      .tab {
+        font: inherit; cursor: pointer;
+        background: none; border: none; color: #9aa0ad;
+        padding: .6rem 1rem; border-bottom: 2px solid transparent; margin-bottom: -1px;
+      }
+      .tab:hover { color: #ddd; }
+      .tab[aria-selected="true"] { color: #fff; border-bottom-color: #6ea8fe; }
+
+      .panel { display: none; }
+      .panel.active { display: block; }
+      .panel h2 { font-size: 1rem; margin-top: 0; }
+      .panel > p { color: #9aa0ad; }
+      code { background: #1b1d24; padding: 0 .3rem; border-radius: 4px; }
+
+      button.action {
+        font: inherit; padding: .5rem 1rem; margin: 0 .5rem .5rem 0; cursor: pointer;
+        background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px;
+      }
+      button.action:disabled { opacity: .5; cursor: default; }
+
+      /* canvas demo */
+      #c {
+        width: 640px; height: 480px; max-width: 100%;
+        image-rendering: pixelated; border-radius: 8px;
+        box-shadow: 0 8px 30px rgba(0,0,0,.35); background: #000;
+        cursor: crosshair; touch-action: none; user-select: none;
+      }
+      #canvas-stats { margin-top: .75rem; color: #5fce86; }
+
+      /* rayon demo */
+      #rayon-canvas {
+        display: block; margin: 1rem 0; border: 1px solid #333;
+        max-width: 100%; image-rendering: pixelated;
+      }
+      #rayon-status { margin-top: .5rem; min-height: 1.5rem; }
+
+      /* benchmark demo */
+      table { border-collapse: collapse; margin-top: 1rem; width: 100%; }
+      th, td { border: 1px solid #2a2d36; padding: .4rem .7rem; text-align: right; }
+      th:first-child, td:first-child { text-align: left; }
+      thead th { background: #1b1d24; }
+      tbody tr:nth-child(even) { background: #14161c; }
+      #bench-status { margin-left: .8rem; color: #9aa0ad; }
+
+      .warn, .err { color: #e6a23c; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>wasm_zero — live demos</h1>
+      <p>
+        Zero-copy, zero-glue Rust → WebAssembly. Everything below runs from this
+        one page; all wasm + JS lives in
+        <a href="https://github.com/Daksh14/wasm_zero/tree/main/docs">/docs</a>.
+      </p>
+    </header>
+
+    <main>
+      <div class="tabs" role="tablist">
+        <button class="tab" id="tab-canvas" role="tab" aria-controls="panel-canvas" aria-selected="true">Canvas</button>
+        <button class="tab" id="tab-rayon" role="tab" aria-controls="panel-rayon" aria-selected="false">Rayon</button>
+        <button class="tab" id="tab-benchmark" role="tab" aria-controls="panel-benchmark" aria-selected="false">Benchmark</button>
+      </div>
+
+      <!-- ================= CANVAS ================= -->
+      <section class="panel active" id="panel-canvas" role="tabpanel" aria-labelledby="tab-canvas">
+        <h2>A DOM-free UI — events in, pixels out</h2>
+        <p>
+          The entire UI (sidebar, button, fractal) is rendered in Rust
+          (<code>wasm32-unknown-unknown</code>, <code>#![no_std]</code>). JS owns
+          only the <code>&lt;canvas&gt;</code>: it pumps mouse state <em>into</em>
+          <code>render(mx, my, down, cx, cy)</code> as scalar args and paints the
+          returned zero-copy <code>Uint8Array</code> with <code>putImageData</code>.
+          Click <strong>PAUSE</strong>, then move the mouse over the fractal to
+          drive the Julia constant. UI state lives in wasm memory.
+        </p>
+        <canvas id="c"></canvas>
+        <div id="canvas-stats">idle</div>
+      </section>
+
+      <!-- ================= RAYON ================= -->
+      <section class="panel" id="panel-rayon" role="tabpanel" aria-labelledby="tab-rayon">
+        <h2>Parallel Mandelbrot — wasm_zero + rayon, sandboxed via exu</h2>
+        <p>
+          Computed in WebAssembly with rayon. <strong>Single thread</strong> runs
+          on one worker; <strong>Multi thread</strong> spreads the rows across
+          <code>navigator.hardwareConcurrency</code> workers sharing one linear
+          memory. The RGBA result is read zero-copy from shared memory and blitted
+          to the canvas. Workers are pooled/reused; the wasm memory is dropped per run.
+        </p>
+        <button class="action" id="rayon-single" disabled>Single thread</button>
+        <button class="action" id="rayon-multi" disabled>Multi thread</button>
+        <div id="rayon-status"></div>
+        <canvas id="rayon-canvas" width="600" height="600"></canvas>
+      </section>
+
+      <!-- ================= BENCHMARK ================= -->
+      <section class="panel" id="panel-benchmark" role="tabpanel" aria-labelledby="tab-benchmark">
+        <h2>wasm_bindgen vs wasm_zero</h2>
+        <p>
+          Each row runs a test N times in three suites: a pure-JS baseline,
+          <code>wasm_bindgen</code>, and <code>wasm_zero</code> (lazy zero-copy
+          access — every field is read so the comparison is fair). Times are the
+          min of several runs; the parenthesised number is the ratio to the JS
+          baseline (lower is faster).
+        </p>
+        <button class="action" id="bench-run" disabled>Run benchmarks</button>
+        <span id="bench-status">idle</span>
+        <table id="bench-results">
+          <thead>
+            <tr><th>Test</th><th>js</th><th>wasm_bindgen</th><th>wasm_zero</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p style="margin-top:1.5rem; color:#666">
+          <a href="https://github.com/alexcrichton/rust-wasm-benchmark">Modeled on alexcrichton/rust-wasm-benchmark</a>
+        </p>
+      </section>
+    </main>
+
+    <script type="module">
+      // ---- tab switching with lazy, once-only init per panel --------------
+      const tabs = [...document.querySelectorAll('.tab')];
+      const initialized = new Set();
+      let active = 'canvas';
+
+      function select(name) {
+        active = name;
+        for (const tab of tabs) {
+          const isThis = tab.id === `tab-${name}`;
+          tab.setAttribute('aria-selected', String(isThis));
+          document.getElementById(tab.getAttribute('aria-controls'))
+            .classList.toggle('active', isThis);
+        }
+        if (!initialized.has(name)) {
+          initialized.add(name);
+          INIT[name]().catch((e) => console.error(`${name} init failed`, e));
+        }
+        onActiveChange(name);
+      }
+      for (const tab of tabs) {
+        tab.addEventListener('click', () => select(tab.id.replace('tab-', '')));
+      }
+
+      // Lets the canvas demo pause its RAF loop when its tab isn't visible.
+      let onActiveChange = () => {};
+
+      const INIT = {
+        // ---------------- CANVAS ----------------
+        async canvas() {
+          const { initWasmZero } = await import('./canvas/bindings.js');
+          const WASM_URL = new URL('./canvas/wasm_zero_test_canvas.wasm', import.meta.url);
+
+          const stats = document.getElementById('canvas-stats');
+          const canvas = document.getElementById('c');
+          const ctx = canvas.getContext('2d');
+
+          const wz = await initWasmZero(WASM_URL);
+          const W = wz.width(), H = wz.height();
+          canvas.width = W;
+          canvas.height = H;
+          const img = ctx.createImageData(W, H);
+
+          // Capture pointer state into plain vars (the canvas shows at 2× via
+          // CSS, so convert client coords to internal pixel space).
+          let mx = -1, my = -1, down = 0;
+          function toCanvas(e) {
+            const r = canvas.getBoundingClientRect();
+            mx = (e.clientX - r.left) * (W / r.width);
+            my = (e.clientY - r.top) * (H / r.height);
+          }
+          canvas.addEventListener('pointermove', toCanvas);
+          canvas.addEventListener('pointerdown', (e) => { toCanvas(e); down = 1; });
+          window.addEventListener('pointerup', () => { down = 0; });
+          canvas.addEventListener('pointerleave', () => { mx = -1; my = -1; });
+
+          let frames = 0, last = performance.now(), fps = 0, running = false;
+
+          function frame(now) {
+            if (active !== 'canvas') { running = false; return; } // pause when hidden
+            const t = now / 1000;
+            const theta = t * 0.4;
+            const cx = 0.7885 * Math.cos(theta);
+            const cy = 0.7885 * Math.sin(theta);
+
+            // Events in (scalars), pixels out (zero-copy view aliasing wasm
+            // memory, valid only until the next call — copy into ImageData now).
+            const pixels = wz.render(mx, my, down, cx, cy);
+            img.data.set(pixels);
+            ctx.putImageData(img, 0, 0);
+
+            frames++;
+            if (now - last >= 500) {
+              fps = Math.round((frames * 1000) / (now - last));
+              frames = 0; last = now;
+              stats.textContent = `${W}×${H} · rendered in Rust · ${fps} fps`;
+            }
+            requestAnimationFrame(frame);
+          }
+
+          // Drive the RAF loop only while the canvas tab is visible.
+          const start = () => { if (!running) { running = true; last = performance.now(); requestAnimationFrame(frame); } };
+          onActiveChange = (name) => { if (name === 'canvas') start(); };
+          start();
+        },
+
+        // ---------------- RAYON ----------------
+        async rayon() {
+          const { Module } = await import('./exu/mod.js');
+
+          const canvas = document.getElementById('rayon-canvas');
+          const ctx = canvas.getContext('2d');
+          const statusEl = document.getElementById('rayon-status');
+          const singleBtn = document.getElementById('rayon-single');
+          const multiBtn = document.getElementById('rayon-multi');
+
+          const W = canvas.width, H = canvas.height;
+          const MAX_ITER = 1000;
+          const cores = navigator.hardwareConcurrency || 4;
+          multiBtn.textContent = `Multi thread (${cores})`;
+
+          const module = new Module(
+            new URL('./rayon/wasm_zero_rayon_demo.wasm', import.meta.url),
+          );
+          module.defaultImports = new URL('./rayon/imports.js', import.meta.url);
+
+          if (self.crossOriginIsolated === false) {
+            statusEl.innerHTML =
+              '<span class="warn">Not cross-origin isolated yet — the service worker reloads the page once on first visit to enable SharedArrayBuffer. If this persists, multi-thread will fail.</span>';
+          }
+
+          // Render with `threads` rayon threads; returns {imageData, ms, threads}.
+          const render = (threads) =>
+            module.task(async (exports, { memory, initThreadPool }) => {
+              const used = await initThreadPool(threads);
+              const t0 = performance.now();
+              const ptr = await exports.__wasm_zero_mandelbrot(W, H, MAX_ITER);
+              const ms = performance.now() - t0;
+              // Copy out of shared memory (sandbox drops it after the task).
+              const data = new Uint8ClampedArray(W * H * 4);
+              data.set(new Uint8Array(memory.buffer, ptr, W * H * 4));
+              return { imageData: new ImageData(data, W, H), ms, threads: used };
+            })();
+
+          const run = async (label, threads) => {
+            singleBtn.disabled = multiBtn.disabled = true;
+            statusEl.textContent = `${label}: rendering…`;
+            try {
+              const { imageData, ms, threads: used } = await render(threads);
+              ctx.putImageData(imageData, 0, 0);
+              statusEl.textContent = `${label}: ${used} thread(s), ${ms.toFixed(1)} ms`;
+            } catch (err) {
+              statusEl.innerHTML = `<span class="warn">error: ${err?.message ?? err}</span>`;
+            } finally {
+              singleBtn.disabled = multiBtn.disabled = false;
+            }
+          };
+
+          singleBtn.addEventListener('click', () => run('Single thread', 1));
+          multiBtn.addEventListener('click', () => run('Multi thread', cores));
+
+          // Enable once the module is ready, and draw an initial frame.
+          singleBtn.disabled = multiBtn.disabled = false;
+          run('Multi thread', cores);
+        },
+
+        // ---------------- BENCHMARK ----------------
+        async benchmark() {
+          const { initBenchmark } = await import('./benchmark/bench.js');
+          await initBenchmark({
+            runBtn: document.getElementById('bench-run'),
+            status: document.getElementById('bench-status'),
+            tbody: document.querySelector('#bench-results tbody'),
+          });
+        },
+      };
+
+      // Initialize the default (canvas) tab on load.
+      select('canvas');
+    </script>
+  </body>
+</html>

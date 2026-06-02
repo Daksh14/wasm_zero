@@ -37,4 +37,4 @@ wasm_zero_build = { path = "crates/wasm_zero_build", version = "0.1.0" }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
-rkyv = { version = "0.8", default-features = false, features = ["alloc", "pointer_width_32", "bytecheck"] }
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "pointer_width_32", "bytecheck", "little_endian"] }
