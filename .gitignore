@@ -1,1 +1,5 @@
 /target
+# exu is a separate cloned repo used for local builds (see Cargo.toml); it is
+# vendored into docs/exu/ for the Pages site, so keep the root clone untracked.
+# Tracking it as a bare gitlink breaks `git submodule update --init` in CI.
+/exu
