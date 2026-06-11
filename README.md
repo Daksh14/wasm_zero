@@ -36,22 +36,22 @@ touches the frontend — and to make the web a faster and more secure place. Rus
 compiled to WASM gives you memory safety and near-native speed; wasm_zero
 removes the friction of getting that power to the browser. You annotate a Rust
 function, and wasm_zero emits a JavaScript/TypeScript shim you can drop straight
-into a bare `.html` file — no bundler, no glue runtime, no `std` assumption. The
-same shim works on a server or inside a [Spin](https://www.fermyon.com/spin)
-Fermyon edge container, so one model spans the browser, the edge, and the
-backend. The less machinery between Rust and the host, the smaller, faster, and
-easier to audit the result — which is the whole point.
+into a bare `.html` file — no bundler, no glue runtime, no `std` assumption. The 
+same emitted wasm can be run on the server with wasmtime or a self hosted VM.
+To allow wasi targets set  `--target wasm32-wasi` as target.
+`wasm-bindgen` is excellent but pulls in a JS glue.
 
-`wasm-bindgen` is excellent but pulls in a JS glue runtime and assumes `std`.
 For small `no_std` wasm modules that just need to hand structured data to a
 JavaScript host, that's a lot of machinery. wasm_zero takes a different tack:
 
 - The Rust side serializes return values with rkyv into a flat byte buffer.
 - The JS side reads that buffer field-by-field straight from wasm memory, using
   readers generated from your Rust types — no hand-maintained schema files and
-  no runtime decode library.
+  no runtime decode library. Strings still use TextDecoder which has a runtime
+  cost along with branching for SSO.
 - The only ABI surface is a handful of integer-in/integer-out functions plus
-  linear memory.
+  linear memory. In the future we want to provide a way to provide a validated
+  abi at compile time for custom ABI needs
 
 ## At Dusk Network: exu
 
