@@ -70,6 +70,10 @@ web browser or the Node.js runtime to run your WASM with:
   delete the WASM memory and drop the worker entirely, so nothing leaks between
   calls.
 
+Note there are caveats with running thread pool like rayon in wasm and rust
+version doesn't map to directly to web. At least until the shared everything
+proposal. [Read more about this in wasm-bindgen documentation](https://wasm-bindgen.github.io/wasm-bindgen/examples/raytrace.html?highlight=threading#caveats)
+
 We maintain a **fork of exu** (vendored in [`exu/`](exu)) that extends upstream
 with a [**rayon**](https://github.com/rayon-rs/rayon) thread pool running over
 *shared* wasm memory — no `wasm-bindgen` required. The fork keeps exu's
