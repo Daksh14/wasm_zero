@@ -39,7 +39,8 @@ function, and wasm_zero emits a JavaScript/TypeScript shim you can drop straight
 into a bare `.html` file — no bundler, no glue runtime, no `std` assumption. The 
 same emitted wasm can be run on the server with wasmtime or a self hosted VM.
 To allow wasi targets set  `--target wasm32-wasi` as target.
-`wasm-bindgen` is excellent but pulls in a JS glue.
+`wasm-bindgen` is excellent but pulls in a JS glue. This library is meant for
+rust to js communication and not the other way.
 
 For small `no_std` wasm modules that just need to hand structured data to a
 JavaScript host, that's a lot of machinery. wasm_zero takes a different tack:
