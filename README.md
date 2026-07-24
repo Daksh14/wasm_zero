@@ -156,8 +156,9 @@ For each `#[wasm_zero] fn foo(args...) -> T`:
 2. Arguments that are scalar primitives (`i8`…`u64`, `f32`, `f64`, `bool`) are
    passed **directly as wasm function parameters** — no encoding, no input
    buffer (the fast path). If any argument is non-scalar (`String`, a struct,
-   `Vec`, …), all args are instead rkyv-encoded (`r.encode`) into an input
-   buffer (`[len][bytes]`) and `in_ptr` is passed.
+   `Vec`, …), all args are instead rkyv-archived **directly into** the input
+   buffer (`[len][bytes]`) — rkyv-js writes through a fixed `RkyvWriter` bound
+   to that region of wasm memory, so nothing is copied — and `in_ptr` is passed.
 3. If the return type is a scalar primitive or `()`, the shim **returns it
    directly** as the wasm function's return value — no output buffer, no rkyv,
    no error code (it can't fail). Otherwise it writes
@@ -270,8 +271,9 @@ Two files are emitted from one model:
   in a browser (no bundler, no CDN).
 
 `rkyv-js` is imported **only** if a function takes a non-scalar argument
-(`String`/struct/…) — it's used to `r.encode` the argument into the input buffer
-(hand-rolling the rkyv *writer* is out of scope). The read path never needs it.
+(`String`/struct/…) — and then only its encoder-only `rkyv-js/encode` entry,
+which archives the argument straight into the input buffer (hand-rolling the
+rkyv *writer* is out of scope). The read path never needs it.
 
 ### 4. Call it
 
@@ -282,9 +284,10 @@ Two files are emitted from one model:
   console.log(wasmzero.get_adult_person());
 </script>
 <!-- Only if a function takes a non-scalar argument, the bindings import
-     rkyv-js; add an import map then:
+     rkyv-js/encode (needs rkyv-js >= 0.2.0 for the external-buffer
+     RkyvWriter); add an import map then:
      <script type="importmap">
-       { "imports": { "rkyv-js": "https://esm.sh/gh/cometkim/rkyv-js" } }
+       { "imports": { "rkyv-js/": "https://esm.sh/rkyv-js@0.2.0/" } }
      </script> -->
 ```
 
@@ -365,7 +368,7 @@ wasm_zero picks the cheapest way to pass arguments based on their types:
 |-----------|----------------|------|
 | none | nullary shim | — |
 | all scalar primitives (`i8`…`u64`, `f32`, `f64`, `bool`) | passed **directly as wasm params** | none — like a bare call |
-| any non-scalar (`String`, struct, `Vec`, …) | rkyv-encoded (`r.encode`) into the input buffer | one encode + copy |
+| any non-scalar (`String`, struct, `Vec`, …) | rkyv-archived **in place** into the input buffer via a fixed `RkyvWriter` | one archive, no copy |
 
 (i64/u64 args are passed as JS `BigInt`.)
 
@@ -400,7 +403,8 @@ a touch faster, while wasm_zero wins when you read only some fields.
 
 - Arguments must be **owned** rkyv types (e.g. `i32`, `String`, a `#[derive(Archive)]`
   struct) — borrowed parameters like `&str` aren't decodable from the input
-  buffer. Non-scalar arguments require `rkyv-js` (for encoding).
+  buffer. Non-scalar arguments require `rkyv-js` >= 0.2.0 (its encoder-only
+  `rkyv-js/encode` entry, for the external-buffer `RkyvWriter`).
 - The generated readers cover scalars, `String`, `Option`, `Vec`, `Box`/`Rc`/`Arc`,
   and `#[derive(Archive)]` structs. Enums, maps, and tuples aren't read yet
   (the build fails with a clear message).

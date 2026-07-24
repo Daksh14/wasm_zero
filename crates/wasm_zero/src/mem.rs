@@ -10,7 +10,6 @@ use core::slice;
 use bytecheck::CheckBytes;
 use rkyv::api::high::{HighDeserializer, HighValidator};
 use rkyv::rancor;
-use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize};
 
 use crate::error::ErrorCode;
@@ -71,18 +70,17 @@ pub unsafe fn read_buffer<'a>(ptr: *const u8) -> &'a [u8] {
 
 /// Parse the buffer
 /// # SAFETY
-/// the pointer
+/// `bytes` must start at a 16-aligned address.
+/// Buffers produced by [`read_buffer`] satisfy this by construction:
+/// `malloc` returns 16-aligned pointers and [`HEADER`] is 16,
+/// so the archive payload is 16-aligned in place — no copy into an aligned scratch is needed.
 pub unsafe fn parse_buffer<T>(bytes: &[u8]) -> Result<T, ErrorCode>
 where
     T: Archive,
     T::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>
         + Deserialize<T, HighDeserializer<rancor::Error>>,
 {
-    // AlignedVec guarantees 16-byte alignment — enough for all rkyv types
-    let mut aligned = AlignedVec::<16>::new();
-    aligned.extend_from_slice(bytes);
-
-    rkyv::from_bytes::<T, rancor::Error>(&aligned).or(Err(ErrorCode::UnarchivingError))
+    rkyv::from_bytes::<T, rancor::Error>(bytes).or(Err(ErrorCode::UnarchivingError))
 }
 
 /// Checks and deserializes a value from the given po

@@ -44,7 +44,7 @@ cargo run -p wasm_zero_serve   # serve the repo root (from the parent workspace)
 ```
 
 Open <http://127.0.0.1:8000/benchmark/web/index.html> and click **Run
-benchmarks**. (rkyv-js is loaded from GitHub via esm.sh, so the page needs
+benchmarks**. (rkyv-js resolves to its npm package via esm.sh, so the page needs
 network access the first time.)
 
 ## Bundle size
@@ -71,7 +71,8 @@ Caveats (also printed by the script):
 - wasm_bindgen ships the `.wasm` plus a **per-module** JS glue file.
 - wasm_zero's `bindings.js` is **self-contained**: it decodes straight from wasm
   memory with no runtime dependency. `rkyv-js` is imported *only* by modules that
-  take a **non-scalar argument** (to `r.encode` it); the benchmark has none, so
+  take a **non-scalar argument** (to archive it into the input buffer), and then
+  only its encoder-only `rkyv-js/encode` entry; the benchmark has none, so
   nothing extra ships.
 
 ## Notes

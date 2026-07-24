@@ -13,13 +13,14 @@
     .ok { color: #0a7d2c; }
   </style>
 
-  <!-- Resolve the bare `rkyv-js` specifier the generated bindings import.
-       rkyv-js isn't on npm, so we build it from its GitHub source via esm.sh.
-       Pinned to a commit for reproducibility; use @main for the latest. -->
+  <!-- Resolve the bare `rkyv-js` specifiers the generated bindings import
+       (`rkyv-js/encode` via the prefix entry). npm package, served via
+       esm.sh, pinned for reproducibility. -->
   <script type="importmap">
   {
     "imports": {
-      "rkyv-js": "https://esm.sh/gh/cometkim/rkyv-js@2c3fc14"
+      "rkyv-js": "https://esm.sh/rkyv-js@0.2.0",
+      "rkyv-js/": "https://esm.sh/rkyv-js@0.2.0/"
     }
   }
   </script>
