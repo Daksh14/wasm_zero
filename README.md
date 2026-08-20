@@ -124,17 +124,22 @@ memory.
         ├── wasm_zero_macro (proc macro, compile time)
         │     emits  __wasm_zero_foo(out_ptr: u32) -> u32
         │     which rkyv-serializes T and writes [len: u32][bytes] at out_ptr
+        │     + embeds foo's signature as a record in the `__wasm_zero`
+        │       custom section of the binary (a #[link_section] static)
         │
-        └── wasm_zero_build (build.rs, before compile)
-              scans the source and emits pkg/bindings.{ts,js}:
+        └── wasm_zero_build (post-build, on the compiled .wasm)
+              reads the `__wasm_zero` section and emits pkg/bindings.{ts,js}:
                 • per-struct readers (decode_Person reads each field)
                 • FFI client         (initWasmZero / wasmzero.foo())
 ```
 
-A proc macro can only return tokens to the compiler — it can't write files. A
-`build.rs` runs *before* the compiler and can. So the two responsibilities are
-split: the macro transforms code, the build helper emits the binding artifacts.
-This is the same division `prost`/`prost-build` and `uniffi` use.
+The macro is the single source of truth: it already has every annotated item's
+exact signature as tokens, so it serializes that into a custom section of the
+wasm binary itself (the linker concatenates the per-item records). The binding
+generator then works from the compiled artifact — it never parses your source,
+so `cfg`s, macro-generated functions, multi-file crates, and re-exports all
+just work. This is the same architecture `wasm-bindgen` uses. The metadata
+section is build-time-only; `--strip-to` writes a shipping copy without it.
 
 ### The FFI / memory protocol
 
@@ -171,7 +176,7 @@ primitives, **32-bit relative pointers**, root at the end of the buffer.
 |-------|------|
 | [`wasm_zero`](crates/wasm_zero) | `no_std` runtime library: the `#[wasm_zero]` re-export, `ErrorCode`, and `mem` (malloc/free + buffer helpers). |
 | [`wasm_zero_macro`](crates/wasm_zero_macro) | The `#[wasm_zero]` attribute proc macro that emits the FFI shim. |
-| [`wasm_zero_build`](crates/wasm_zero_build) | `build.rs` helper that generates the self-contained TS/JS bindings (`bindings.ts` + `bindings.js`). |
+| [`wasm_zero_build`](crates/wasm_zero_build) | Post-build binding generator: reads the `__wasm_zero` metadata section from the compiled `.wasm` and emits the self-contained TS/JS bindings (`bindings.ts` + `bindings.js`). |
 | [`wasm_zero_serve`](crates/wasm_zero_serve) | Tiny axum static-file server for running the demo pages. |
 | [`wasm_zero_test_nostd`](crates/wasm_zero_test_nostd) | `no_std` demo: rkyv types + `#[wasm_zero]` functions + a browser page. |
 | [`wasm_zero_test`](crates/wasm_zero_test) | A `wasm-bindgen`/`std` comparison crate. |
@@ -191,9 +196,6 @@ There's also a standalone [`benchmark/`](benchmark) workspace comparing
 [dependencies]
 wasm_zero = "0.1"
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "pointer_width_32"] }
-
-[build-dependencies]
-wasm_zero_build = "0.1"
 ```
 
 ### 2. Annotate your types and functions
@@ -207,6 +209,7 @@ use alloc::vec::Vec;
 use rkyv::{Archive, Deserialize, Serialize};
 use wasm_zero::wasm_zero;
 
+#[wasm_zero] // record the struct's layout for the binding generator
 #[derive(Archive, Serialize, Deserialize)]
 pub struct Person {
     pub name: String,
@@ -221,14 +224,22 @@ pub fn get_adult_person() -> Person {
 }
 ```
 
-### 3. Generate the bindings from `build.rs`
+Structs that appear in a `#[wasm_zero]` function signature carry the attribute
+too, so their field layout is recorded alongside the functions.
 
-```rust
-fn main() {
-    // Writes pkg/bindings.ts and pkg/bindings.js
-    wasm_zero_build::generate("src/lib.rs", "pkg");
-}
+### 3. Generate the bindings from the compiled wasm
+
+```bash
+cargo build --target wasm32-unknown-unknown -p your_crate
+
+# Reads the __wasm_zero metadata section from the binary and writes
+# pkg/bindings.ts and pkg/bindings.js. Optionally add
+# `--strip-to <out.wasm>` to also write a copy without the metadata section.
+cargo run -p wasm_zero_build --example generate -- \
+    target/wasm32-unknown-unknown/debug/your_crate.wasm pkg
 ```
+
+(Or call `wasm_zero_build::generate(wasm_path, out_dir)` from your own tool.)
 
 This produces a **self-contained** FFI client — a TypeScript interface plus a
 zero-copy reader per struct, with no runtime dependency:
@@ -257,11 +268,7 @@ Two files are emitted from one model:
 (`String`/struct/…) — it's used to `r.encode` the argument into the input buffer
 (hand-rolling the rkyv *writer* is out of scope). The read path never needs it.
 
-### 4. Build the wasm and call it
-
-```bash
-cargo build --target wasm32-unknown-unknown -p your_crate
-```
+### 4. Call it
 
 ```html
 <script type="module">
@@ -281,6 +288,12 @@ cargo build --target wasm32-unknown-unknown -p your_crate
 ```bash
 # Build the no_std demo wasm
 cargo build --target wasm32-unknown-unknown -p wasm_zero_test_nostd
+
+# Regenerate the bindings from the compiled wasm (committed, so only needed
+# after changing the demo's #[wasm_zero] items)
+cargo run -p wasm_zero_build --example generate -- \
+    target/wasm32-unknown-unknown/debug/wasm_zero_test_nostd.wasm \
+    crates/wasm_zero_test_nostd/pkg
 
 # Serve the workspace (defaults to http://127.0.0.1:8000)
 cargo run -p wasm_zero_serve

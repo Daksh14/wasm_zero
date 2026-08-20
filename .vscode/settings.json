@@ -1,0 +1,9 @@
+{
+    "rust-analyzer.cargo.allTargets": false,
+    "rust-analyzer.cargo.buildScripts.invocationStrategy": "once",
+    "rust-analyzer.check.invocationStrategy": "once",
+    "rust-analyzer.procMacro.enable": false,
+    "rust-analyzer.cargo.target": "wasm32-wasip3",
+    "rust-analyzer.cargo.cfgs": ["tokio_unstable"],
+    
+}

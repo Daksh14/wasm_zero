@@ -10,6 +10,3 @@ crate-type = ["cdylib"]
 wasm_zero = { path = "../../crates/wasm_zero" }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "pointer_width_32", "bytecheck"] }
 dlmalloc = { version = "0.2", features = ["global"] }
-
-[build-dependencies]
-wasm_zero_build = { path = "../../crates/wasm_zero_build" }

@@ -1,15 +1,33 @@
-//! Tiny CLI wrapper around [`wasm_zero_build::generate`], handy for generating
-//! bindings outside of a `build.rs` (e.g. in CI or by hand).
+//! Tiny CLI wrapper around [`wasm_zero_build::generate`]. Run it after
+//! `cargo build --target wasm32-unknown-unknown` — it reads the `__wasm_zero`
+//! metadata section from the compiled binary and writes the bindings.
 //!
 //! ```text
-//! cargo run -p wasm_zero_build --example generate -- <src.rs> <out_dir>
+//! cargo run -p wasm_zero_build --example generate -- \
+//!     <module.wasm> <out_dir> [--strip-to <stripped.wasm>]
 //! ```
+//!
+//! `--strip-to` additionally writes a copy of the module with the metadata
+//! section removed — use that copy as the shipped artifact.
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let (Some(src), Some(out_dir)) = (args.next(), args.next()) else {
-        eprintln!("usage: generate <src.rs> <out_dir>");
-        std::process::exit(2);
+    let (Some(wasm), Some(out_dir)) = (args.next(), args.next()) else {
+        usage();
     };
-    wasm_zero_build::generate(src, out_dir);
+    let strip_to = match (args.next().as_deref(), args.next()) {
+        (None, _) => None,
+        (Some("--strip-to"), Some(out)) => Some(out),
+        _ => usage(),
+    };
+
+    wasm_zero_build::generate(&wasm, out_dir);
+    if let Some(out) = strip_to {
+        wasm_zero_build::strip(&wasm, out);
+    }
+}
+
+fn usage() -> ! {
+    eprintln!("usage: generate <module.wasm> <out_dir> [--strip-to <stripped.wasm>]");
+    std::process::exit(2);
 }

@@ -1,8 +1,9 @@
-//! Build-helper for `wasm_zero`.
+//! Binding generator for `wasm_zero`.
 //!
-//! Runs in a consumer crate's `build.rs` (the proc macro can't write files; a
-//! build script can). It scans the source for rkyv structs and `#[wasm_zero]`
-//! functions and emits `bindings.ts` + `bindings.js`.
+//! Runs **after** `cargo build`, on the compiled `.wasm`. The `#[wasm_zero]`
+//! macro embeds each annotated function's and struct's signature as a metadata
+//! record in a `__wasm_zero` custom section of the binary; this crate extracts
+//! that section — no source parsing — and emits `bindings.ts` + `bindings.js`.
 //!
 //! The read path is **self-contained and zero-copy**: for each struct it emits
 //! a `decode_<Struct>` function that reads each field straight out of wasm
@@ -15,132 +16,249 @@
 //! the rkyv *writer* is out of scope). Scalar args pass directly as wasm params,
 //! and scalar/unit returns come back as the wasm function's value.
 //!
-//! ```no_run
-//! fn main() { wasm_zero_build::generate("src/lib.rs", "pkg"); }
+//! ```text
+//! cargo build --target wasm32-unknown-unknown -p my_crate
+//! cargo run -p wasm_zero_build --example generate -- \
+//!     target/wasm32-unknown-unknown/debug/my_crate.wasm pkg
 //! ```
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use syn::{Fields, Item, ItemFn, ItemStruct, ReturnType, Type};
+use syn::Type;
 
 /// Struct name -> its fields (in declaration order).
 type StructMap = BTreeMap<String, Vec<(String, Type)>>;
 
+/// A `#[wasm_zero]` function, as recorded by the macro.
+pub struct FnMeta {
+    pub name: String,
+    pub args: Vec<(String, Type)>,
+    pub ret: Type,
+}
+
 /// The two files to write.
+#[derive(Debug)]
 pub struct Generated {
     pub ts: String,
     pub js: String,
 }
 
-/// Scan `src` and write `bindings.ts` + `bindings.js` into `out_dir`.
-pub fn generate(src: impl AsRef<Path>, out_dir: impl AsRef<Path>) {
-    let src = src.as_ref();
+/// Read the compiled `wasm`, extract the `__wasm_zero` metadata section, and
+/// write `bindings.ts` + `bindings.js` into `out_dir`.
+pub fn generate(wasm: impl AsRef<Path>, out_dir: impl AsRef<Path>) {
+    let wasm = wasm.as_ref();
     let out_dir = out_dir.as_ref();
 
-    let source = std::fs::read_to_string(src).unwrap_or_else(|e| {
-        panic!("wasm_zero_build: failed to read {}: {e}", src.display())
-    });
-    let g = generate_bindings(&source).unwrap_or_else(|e| {
-        panic!("wasm_zero_build: failed to parse {}: {e}", src.display())
-    });
+    let bytes = std::fs::read(wasm)
+        .unwrap_or_else(|e| panic!("wasm_zero_build: failed to read {}: {e}", wasm.display()));
+    let g = generate_bindings(&bytes)
+        .unwrap_or_else(|e| panic!("wasm_zero_build: {}: {e}", wasm.display()));
 
     std::fs::create_dir_all(out_dir).unwrap_or_else(|e| {
-        panic!("wasm_zero_build: failed to create {}: {e}", out_dir.display())
+        panic!(
+            "wasm_zero_build: failed to create {}: {e}",
+            out_dir.display()
+        )
     });
     for (name, contents) in [("bindings.ts", &g.ts), ("bindings.js", &g.js)] {
         let path = out_dir.join(name);
-        std::fs::write(&path, contents).unwrap_or_else(|e| {
-            panic!("wasm_zero_build: failed to write {}: {e}", path.display())
-        });
+        std::fs::write(&path, contents)
+            .unwrap_or_else(|e| panic!("wasm_zero_build: failed to write {}: {e}", path.display()));
     }
-    println!("cargo:rerun-if-changed={}", src.display());
 }
 
-/// Parse `source` and render both files. Pure — unit-testable.
-pub fn generate_bindings(source: &str) -> syn::Result<Generated> {
-    let file = syn::parse_file(source)?;
+/// Copy the wasm at `wasm` to `out` with the `__wasm_zero` metadata sections
+/// removed (they're only needed to generate bindings, not at runtime).
+pub fn strip(wasm: impl AsRef<Path>, out: impl AsRef<Path>) {
+    let wasm = wasm.as_ref();
+    let out = out.as_ref();
+    let bytes = std::fs::read(wasm)
+        .unwrap_or_else(|e| panic!("wasm_zero_build: failed to read {}: {e}", wasm.display()));
+    let stripped = strip_meta(&bytes)
+        .unwrap_or_else(|e| panic!("wasm_zero_build: {}: {e}", wasm.display()));
+    std::fs::write(out, stripped)
+        .unwrap_or_else(|e| panic!("wasm_zero_build: failed to write {}: {e}", out.display()));
+}
 
-    let mut structs: StructMap = BTreeMap::new();
-    for item in &file.items {
-        if let Item::Struct(s) = item {
-            if derives_archive(s) {
-                if let Fields::Named(f) = &s.fields {
-                    structs.insert(
-                        s.ident.to_string(),
-                        f.named
-                            .iter()
-                            .map(|f| {
-                                (f.ident.as_ref().unwrap().to_string(), f.ty.clone())
-                            })
-                            .collect(),
-                    );
-                }
-            }
+/// `wasm` with every `__wasm_zero` custom section removed. Pure.
+pub fn strip_meta(wasm: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(wasm.len());
+    for_each_section(wasm, |chunk, meta| {
+        if meta.is_none() {
+            out.extend_from_slice(chunk);
         }
+    })?;
+    Ok(out)
+}
+
+/// Decode the metadata embedded in a wasm binary and render both files.
+/// Pure — unit-testable.
+pub fn generate_bindings(wasm: &[u8]) -> Result<Generated, String> {
+    let blob = extract_meta_section(wasm)?;
+    if blob.is_empty() {
+        return Err(
+            "no `__wasm_zero` metadata section found — does the crate use #[wasm_zero]? \
+             (note: wasm-opt/strip may remove custom sections; generate bindings first)"
+                .into(),
+        );
     }
-
-    let funcs: Vec<&ItemFn> = file
-        .items
-        .iter()
-        .filter_map(|i| match i {
-            Item::Fn(f) if has_wasm_zero_attr(f) => Some(f),
-            _ => None,
-        })
-        .collect();
-
+    let (structs, funcs) = parse_records(&blob)?;
     Ok(Generated {
         ts: render_module(true, &structs, &funcs),
         js: render_module(false, &structs, &funcs),
     })
 }
 
-fn has_wasm_zero_attr(f: &ItemFn) -> bool {
-    f.attrs.iter().any(|a| a.path().is_ident("wasm_zero"))
-}
+// ---------------------------------------------------------------------------
+// Metadata extraction: wasm custom section -> records.
+//
+// Encoding, kept in sync with wasm_zero_macro::meta_static:
+//   record  = [payload_len: u32 LE][payload: utf8]
+//   payload = fields joined by U+001F (unit separator)
+//   fields  = version("1"), kind("fn"|"struct"), name, then per-item data;
+//             name/type pairs use U+001E between name and type.
+// The linker concatenates the per-item `#[link_section]` statics, so the
+// section is a back-to-back sequence of length-prefixed records.
+// ---------------------------------------------------------------------------
 
-fn derives_archive(s: &ItemStruct) -> bool {
-    s.attrs.iter().any(|attr| {
-        if !attr.path().is_ident("derive") {
-            return false;
+const META_SECTION: &str = "__wasm_zero";
+const META_VERSION: &str = "1";
+const FIELD_SEP: char = '\u{1f}';
+const PAIR_SEP: char = '\u{1e}';
+
+fn leb_u32(bytes: &[u8], pos: &mut usize) -> Result<u32, String> {
+    let mut result = 0u32;
+    let mut shift = 0;
+    loop {
+        let b = *bytes.get(*pos).ok_or("truncated wasm (leb128)")?;
+        *pos += 1;
+        result |= u32::from(b & 0x7f) << shift;
+        if b & 0x80 == 0 {
+            return Ok(result);
         }
-        let mut found = false;
-        let _ = attr.parse_nested_meta(|m| {
-            if m.path.is_ident("Archive") {
-                found = true;
-            }
-            Ok(())
-        });
-        found
-    })
-}
-
-fn return_type(f: &ItemFn) -> &Type {
-    match &f.sig.output {
-        ReturnType::Type(_, ty) => ty,
-        ReturnType::Default => {
-            panic!("wasm_zero_build: `{}` has no return type", f.sig.ident)
+        shift += 7;
+        if shift >= 32 {
+            return Err("leb128 overflow".into());
         }
     }
 }
 
-/// A `#[wasm_zero]` function's args as `(js_name, type)`.
-fn fn_args(f: &ItemFn) -> Vec<(String, Type)> {
-    f.sig
-        .inputs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, a)| match a {
-            syn::FnArg::Typed(pt) => {
-                let name = match &*pt.pat {
-                    syn::Pat::Ident(id) => id.ident.to_string(),
-                    _ => format!("arg{i}"),
-                };
-                Some((name, (*pt.ty).clone()))
+/// Walk the wasm header and sections. For each chunk, calls `f(chunk, meta)`
+/// where `chunk` is the raw bytes (the 8-byte header, or a whole section
+/// including its id/size prefix) and `meta` is `Some(data)` iff the chunk is a
+/// `__wasm_zero` custom section (data = the contents after the section name).
+fn for_each_section<'a>(
+    wasm: &'a [u8],
+    mut f: impl FnMut(&'a [u8], Option<&'a [u8]>),
+) -> Result<(), String> {
+    if wasm.len() < 8 || &wasm[..4] != b"\0asm" {
+        return Err("not a wasm binary".into());
+    }
+    f(&wasm[..8], None);
+    let mut pos = 8;
+    while pos < wasm.len() {
+        let start = pos;
+        let id = wasm[pos];
+        pos += 1;
+        let size = leb_u32(wasm, &mut pos)? as usize;
+        let end = pos
+            .checked_add(size)
+            .filter(|&e| e <= wasm.len())
+            .ok_or("truncated wasm section")?;
+        let mut meta = None;
+        if id == 0 {
+            let mut p = pos;
+            let name_len = leb_u32(wasm, &mut p)? as usize;
+            if let Some(name_end) = p.checked_add(name_len).filter(|&e| e <= end) {
+                if &wasm[p..name_end] == META_SECTION.as_bytes() {
+                    meta = Some(&wasm[name_end..end]);
+                }
             }
-            syn::FnArg::Receiver(_) => None,
-        })
-        .collect()
+        }
+        f(&wasm[start..end], meta);
+        pos = end;
+    }
+    Ok(())
+}
+
+/// Concatenated contents of every `__wasm_zero` custom section in `wasm`.
+fn extract_meta_section(wasm: &[u8]) -> Result<Vec<u8>, String> {
+    let mut blob = Vec::new();
+    for_each_section(wasm, |_, meta| {
+        if let Some(m) = meta {
+            blob.extend_from_slice(m);
+        }
+    })?;
+    Ok(blob)
+}
+
+fn parse_ty(s: &str) -> Result<Type, String> {
+    syn::parse_str::<Type>(s).map_err(|e| format!("bad type `{s}` in metadata: {e}"))
+}
+
+fn parse_pair(s: &str) -> Result<(String, Type), String> {
+    let (name, ty) = s
+        .split_once(PAIR_SEP)
+        .ok_or_else(|| format!("malformed name/type pair `{s}` in metadata"))?;
+    Ok((name.to_string(), parse_ty(ty)?))
+}
+
+/// Split the section blob into records and decode them.
+fn parse_records(blob: &[u8]) -> Result<(StructMap, Vec<FnMeta>), String> {
+    let mut structs = StructMap::new();
+    let mut funcs: Vec<FnMeta> = Vec::new();
+
+    let mut pos = 0usize;
+    while pos < blob.len() {
+        let len_bytes: [u8; 4] = blob
+            .get(pos..pos + 4)
+            .ok_or("truncated metadata record header")?
+            .try_into()
+            .unwrap();
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        pos += 4;
+        let payload = blob
+            .get(pos..pos + len)
+            .ok_or("truncated metadata record")?;
+        pos += len;
+
+        let payload =
+            std::str::from_utf8(payload).map_err(|e| format!("non-utf8 metadata record: {e}"))?;
+        let mut fields = payload.split(FIELD_SEP);
+
+        let version = fields.next().unwrap_or_default();
+        if version != META_VERSION {
+            return Err(format!(
+                "metadata version `{version}` doesn't match this wasm_zero_build \
+                 (expected `{META_VERSION}`) — rebuild with matching crate versions"
+            ));
+        }
+        let kind = fields.next().unwrap_or_default();
+        let name = fields
+            .next()
+            .filter(|n| !n.is_empty())
+            .ok_or("metadata record missing item name")?
+            .to_string();
+
+        match kind {
+            "fn" => {
+                let ret = parse_ty(fields.next().ok_or_else(|| {
+                    format!("metadata for fn `{name}` missing return type")
+                })?)?;
+                let args = fields.map(parse_pair).collect::<Result<Vec<_>, _>>()?;
+                funcs.push(FnMeta { name, args, ret });
+            }
+            "struct" => {
+                let fields = fields.map(parse_pair).collect::<Result<Vec<_>, _>>()?;
+                structs.insert(name, fields);
+            }
+            other => return Err(format!("unknown metadata record kind `{other}`")),
+        }
+    }
+    // Linker section order isn't source order — sort for deterministic output.
+    funcs.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok((structs, funcs))
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +328,8 @@ fn archived(ty: &Type, structs: &StructMap) -> (u32, u32) {
         name if structs.contains_key(name) => struct_layout(&structs[name], structs),
         other => panic!(
             "wasm_zero_build: cannot read type `{other}`. Supported: scalars, \
-             String, Option, Vec, Box/Rc/Arc, and #[derive(Archive)] structs."
+             String, Option, Vec, Box/Rc/Arc, and #[wasm_zero] structs. \
+             (structs must carry the #[wasm_zero] attribute to be recorded)"
         ),
     }
 }
@@ -227,7 +346,8 @@ fn struct_layout(fields: &[(String, Type)], structs: &StructMap) -> (u32, u32) {
 }
 
 fn arg0(args: &[Type]) -> &Type {
-    args.first().expect("wasm_zero_build: generic type needs an argument")
+    args.first()
+        .expect("wasm_zero_build: generic type needs an argument")
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +415,11 @@ fn read_field(ty: &Type, structs: &StructMap, addr: &str) -> String {
         }
         "Box" | "Rc" | "Arc" => {
             // Relative pointer at `addr`; target at addr + offset.
-            read_field(arg0(&args), structs, &format!("({addr}) + dv.getInt32({addr}, true)"))
+            read_field(
+                arg0(&args),
+                structs,
+                &format!("({addr}) + dv.getInt32({addr}, true)"),
+            )
         }
         name if structs.contains_key(name) => {
             format!("decode_{name}(dv, u8, {addr})")
@@ -318,8 +442,9 @@ fn ts_type(ty: &Type, structs: &StructMap) -> String {
         }
         "Option" => format!("{} | null", ts_type(arg0(&args), structs)),
         "Box" | "Rc" | "Arc" => ts_type(arg0(&args), structs),
-        "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64" | "usize"
-        | "isize" => "number".to_string(),
+        "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" | "f64" | "usize" | "isize" => {
+            "number".to_string()
+        }
         "u64" | "i64" | "u128" | "i128" => "bigint".to_string(),
         "bool" => "boolean".to_string(),
         "char" | "String" | "str" | "SmolStr" => "string".to_string(),
@@ -346,8 +471,8 @@ fn codec_expr(ty: &Type, structs: &StructMap) -> String {
         "Option" => format!("r.option({})", codec_expr(arg0(&args), structs)),
         "Box" => format!("r.box({})", codec_expr(arg0(&args), structs)),
         "Rc" | "Arc" => format!("r.rc({})", codec_expr(arg0(&args), structs)),
-        "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "f32"
-        | "f64" | "bool" | "char" => format!("r.{id}"),
+        "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "f32" | "f64" | "bool"
+        | "char" => format!("r.{id}"),
         "usize" => "r.u32".to_string(),
         "isize" => "r.i32".to_string(),
         "String" | "str" | "SmolStr" => "r.string".to_string(),
@@ -374,13 +499,13 @@ fn args_codec(args: &[(String, Type)], structs: &StructMap) -> String {
 // Module rendering
 // ---------------------------------------------------------------------------
 
-fn render_module(typed: bool, structs: &StructMap, funcs: &[&ItemFn]) -> String {
+fn render_module(typed: bool, structs: &StructMap, funcs: &[FnMeta]) -> String {
     let t = |s: &str| if typed { s.to_string() } else { String::new() };
 
     // rkyv-js is needed only to encode non-scalar arguments.
     let needs_rkyv = funcs
         .iter()
-        .any(|f| fn_args(f).iter().any(|(_, ty)| !is_scalar(ty)));
+        .any(|f| f.args.iter().any(|(_, ty)| !is_scalar(ty)));
 
     let mut out = String::new();
     out.push_str("// Auto-generated by wasm_zero. Do not edit by hand.\n");
@@ -439,7 +564,9 @@ fn render_module(typed: bool, structs: &StructMap, funcs: &[&ItemFn]) -> String 
     // One decoder per struct: reads each field at its archived offset.
     out.push_str("// ---- per-struct field readers ----\n");
     for (name, fields) in structs {
-        out.push_str(&format!("function decode_{name}(dv, u8, p) {{\n  return {{\n"));
+        out.push_str(&format!(
+            "function decode_{name}(dv, u8, p) {{\n  return {{\n"
+        ));
         let mut off = 0u32;
         for (field, ty) in fields {
             let (s, a) = archived(ty, structs);
@@ -502,7 +629,12 @@ fn render_module(typed: bool, structs: &StructMap, funcs: &[&ItemFn]) -> String 
          \x20 }}\n\n\
          \x20 return {{\n\
          \x20   wasm,\n",
-        t(": string"), t(": number"), t(": any"), t(": any"), t(": any"), t(": any"),
+        t(": string"),
+        t(": number"),
+        t(": any"),
+        t(": any"),
+        t(": any"),
+        t(": any"),
     ));
     for f in funcs {
         out.push_str(&render_method(f, structs, typed));
@@ -523,14 +655,18 @@ fn render_module(typed: bool, structs: &StructMap, funcs: &[&ItemFn]) -> String 
 }
 
 /// Render one method on the bound object.
-fn render_method(f: &ItemFn, structs: &StructMap, typed: bool) -> String {
-    let name = f.sig.ident.to_string();
+fn render_method(f: &FnMeta, structs: &StructMap, typed: bool) -> String {
+    let name = &f.name;
     let shim = format!("__wasm_zero_{name}");
-    let ret = return_type(f);
-    let args = fn_args(f);
+    let ret = &f.ret;
+    let args = &f.args;
 
-    let names_csv =
-        || args.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ");
+    let names_csv = || {
+        args.iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let params = if typed {
         args.iter()
             .map(|(n, ty)| format!("{n}: {}", ts_type(ty, structs)))
@@ -542,15 +678,17 @@ fn render_method(f: &ItemFn, structs: &StructMap, typed: bool) -> String {
 
     // Fully-scalar fast path: scalar/unit return + nullary-or-all-scalar args.
     let unit_ret = matches!(ret, Type::Tuple(t) if t.elems.is_empty());
-    if (unit_ret || is_scalar(ret))
-        && (args.is_empty() || args.iter().all(|(_, t)| is_scalar(t)))
-    {
+    if (unit_ret || is_scalar(ret)) && (args.is_empty() || args.iter().all(|(_, t)| is_scalar(t))) {
         let call = format!("wasm[{shim:?}]({})", names_csv());
         if unit_ret {
             let ann = if typed { ": void" } else { "" };
             return format!("    {name}({params}){ann} {{ {call}; }},\n");
         }
-        let ann = if typed { format!(": {}", ts_type(ret, structs)) } else { String::new() };
+        let ann = if typed {
+            format!(": {}", ts_type(ret, structs))
+        } else {
+            String::new()
+        };
         let expr = if path_parts(unref(ret)).0 == "bool" {
             format!("{call} !== 0")
         } else {
@@ -569,12 +707,16 @@ fn render_method(f: &ItemFn, structs: &StructMap, typed: bool) -> String {
             [(n, _)] => n.clone(),
             _ => format!("[{}]", names_csv()),
         };
-        (args_codec(&args, structs), value, "null".into())
+        (args_codec(args, structs), value, "null".into())
     };
 
     let size = archived(ret, structs).0;
     let read = read_field(ret, structs, "p");
-    let ann = if typed { format!(": {}", ts_type(ret, structs)) } else { String::new() };
+    let ann = if typed {
+        format!(": {}", ts_type(ret, structs))
+    } else {
+        String::new()
+    };
     format!(
         "    {name}({params}){ann} {{ return call({shim:?}, {size}, (dv, u8, p) => {read}, {arg_codec}, {arg_value}, {direct_args}); }},\n"
     )
@@ -584,26 +726,84 @@ fn render_method(f: &ItemFn, structs: &StructMap, typed: bool) -> String {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"
-        #[derive(Archive, Serialize, Deserialize)]
-        pub struct Person {
-            pub name: String,
-            pub age: u32,
-            pub email: Option<String>,
-            pub scores: Vec<u32>,
-        }
+    /// Encode one metadata record the way the macro does.
+    fn record(fields: &[&str]) -> Vec<u8> {
+        let payload = fields.join("\u{1f}");
+        let mut v = (payload.len() as u32).to_le_bytes().to_vec();
+        v.extend_from_slice(payload.as_bytes());
+        v
+    }
 
-        #[wasm_zero] pub fn get_adult_person() -> Person { todo!() }
-        #[wasm_zero] pub fn greet() -> String { todo!() }
-        #[wasm_zero] pub fn add(a: i32, b: i32) -> i32 { todo!() }
-        #[wasm_zero] pub fn tick() -> () { todo!() }
-        #[wasm_zero] pub fn nums() -> Vec<u32> { todo!() }
-        pub fn ignored() -> u32 { 0 }
-    "#;
+    fn pair(name: &str, ty: &str) -> String {
+        format!("{name}\u{1e}{ty}")
+    }
+
+    /// Wrap a metadata blob in a minimal-but-valid wasm binary with a
+    /// `__wasm_zero` custom section (plus an unrelated custom section).
+    fn fake_wasm(blob: &[u8]) -> Vec<u8> {
+        fn leb(mut v: u32, out: &mut Vec<u8>) {
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v == 0 {
+                    out.push(b);
+                    break;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        fn custom(name: &str, data: &[u8], out: &mut Vec<u8>) {
+            let mut payload = Vec::new();
+            leb(name.len() as u32, &mut payload);
+            payload.extend_from_slice(name.as_bytes());
+            payload.extend_from_slice(data);
+            out.push(0); // custom section id
+            leb(payload.len() as u32, out);
+            out.extend_from_slice(&payload);
+        }
+        let mut w = b"\0asm\x01\0\0\0".to_vec();
+        custom("producers", b"whatever", &mut w);
+        custom("__wasm_zero", blob, &mut w);
+        w
+    }
+
+    /// Metadata matching the old source-scanning test sample.
+    fn sample() -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend(record(&[
+            "1",
+            "struct",
+            "Person",
+            &pair("name", "String"),
+            &pair("age", "u32"),
+            &pair("email", "Option<String>"),
+            &pair("scores", "Vec<u32>"),
+        ]));
+        blob.extend(record(&["1", "fn", "get_adult_person", "Person"]));
+        blob.extend(record(&["1", "fn", "greet", "String"]));
+        blob.extend(record(&[
+            "1",
+            "fn",
+            "add",
+            "i32",
+            &pair("a", "i32"),
+            &pair("b", "i32"),
+        ]));
+        blob.extend(record(&["1", "fn", "tick", "()"]));
+        blob.extend(record(&["1", "fn", "nums", "Vec<u32>"]));
+        blob
+    }
+
+    #[test]
+    fn extracts_custom_section() {
+        let wasm = fake_wasm(&sample());
+        let blob = extract_meta_section(&wasm).unwrap();
+        assert_eq!(blob, sample());
+    }
 
     #[test]
     fn struct_field_offsets() {
-        let g = generate_bindings(SAMPLE).unwrap();
+        let g = generate_bindings(&fake_wasm(&sample())).unwrap();
         // ArchivedPerson: name@0(8) age@8(4) email@12(Option<String>=12) scores@24(8)
         assert!(g.js.contains("name: rdStr(dv, u8, p + 0)"));
         assert!(g.js.contains("age: dv.getUint32(p + 8, true)"));
@@ -615,7 +815,7 @@ mod tests {
 
     #[test]
     fn methods() {
-        let g = generate_bindings(SAMPLE).unwrap();
+        let g = generate_bindings(&fake_wasm(&sample())).unwrap();
         // scalar/unit fast paths
         assert!(g.js.contains("add(a, b) { return wasm[\"__wasm_zero_add\"](a, b); }"));
         assert!(g.js.contains("tick() { wasm[\"__wasm_zero_tick\"](); }"));
@@ -636,15 +836,48 @@ mod tests {
 
     #[test]
     fn non_scalar_arg_uses_rkyv() {
-        let src = r#"
-            #[derive(Archive)] pub struct P { pub x: u32 }
-            #[wasm_zero] pub fn shout(msg: String) -> String { todo!() }
-        "#;
-        let g = generate_bindings(src).unwrap();
+        let mut blob = Vec::new();
+        blob.extend(record(&["1", "struct", "P", &pair("x", "u32")]));
+        blob.extend(record(&["1", "fn", "shout", "String", &pair("msg", "String")]));
+        let g = generate_bindings(&fake_wasm(&blob)).unwrap();
         assert!(g.js.contains("import * as r from 'rkyv-js'"));
         assert!(g.js.contains(
             "shout(msg) { return call(\"__wasm_zero_shout\", 8, (dv, u8, p) => rdStr(dv, u8, p), r.string, msg, null); }"
         ));
         assert!(g.js.contains("r.encode(argCodec, argValue)"));
+    }
+
+    #[test]
+    fn strip_removes_only_the_meta_section() {
+        let wasm = fake_wasm(&sample());
+        let stripped = strip_meta(&wasm).unwrap();
+        assert!(extract_meta_section(&stripped).unwrap().is_empty());
+        // Everything else survives (header + the "producers" section).
+        assert_eq!(&stripped[..8], &wasm[..8]);
+        assert!(stripped
+            .windows(b"producers".len())
+            .any(|w| w == b"producers"));
+        assert!(stripped.len() < wasm.len());
+    }
+
+    #[test]
+    fn version_mismatch_is_an_error() {
+        let blob = record(&["9", "fn", "f", "u32"]);
+        let err = generate_bindings(&fake_wasm(&blob)).unwrap_err();
+        assert!(err.contains("version"), "{err}");
+    }
+
+    #[test]
+    fn missing_section_is_an_error() {
+        let err = generate_bindings(b"\0asm\x01\0\0\0").unwrap_err();
+        assert!(err.contains("__wasm_zero"), "{err}");
+    }
+
+    #[test]
+    fn types_with_token_spaces_parse() {
+        // The macro stringifies types via token streams: `Vec < u32 >`.
+        let blob = record(&["1", "fn", "nums", "Vec < u32 >"]);
+        let g = generate_bindings(&fake_wasm(&blob)).unwrap();
+        assert!(g.js.contains("rdVec(dv, p, Uint32Array)"));
     }
 }

@@ -19,7 +19,6 @@ dependencies = [
  "dlmalloc",
  "rkyv",
  "wasm_zero",
- "wasm_zero_build",
 ]
 
 [[package]]
@@ -403,14 +402,6 @@ dependencies = [
  "rkyv",
  "rkyv-js-codegen",
  "wasm_zero_macro",
-]
-
-[[package]]
-name = "wasm_zero_build"
-version = "0.1.0"
-dependencies = [
- "quote",
- "syn",
 ]
 
 [[package]]

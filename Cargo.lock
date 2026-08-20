@@ -880,7 +880,6 @@ version = "0.1.0"
 dependencies = [
  "rayon",
  "wasm_zero",
- "wasm_zero_build",
  "wasm_zero_rayon_pool",
 ]
 
@@ -917,7 +916,6 @@ dependencies = [
  "dlmalloc",
  "rkyv",
  "wasm_zero",
- "wasm_zero_build",
 ]
 
 [[package]]
@@ -928,7 +926,6 @@ dependencies = [
  "rkyv",
  "wasm-bindgen",
  "wasm_zero",
- "wasm_zero_build",
 ]
 
 [[package]]

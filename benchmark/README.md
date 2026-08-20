@@ -11,7 +11,7 @@ dependencies stay out of the core `wasm_zero` crates.
 ```
 benchmark/
 ├── wasm-bindgen/   crate: the wasm-bindgen suite (cdylib)
-├── wasm-zero/      crate: the wasm_zero suite (no_std cdylib, build.rs emits bindings)
+├── wasm-zero/      crate: the wasm_zero suite (no_std cdylib; build.sh generates bindings from the compiled wasm)
 ├── web/
 │   ├── index.html  harness page + importmap for rkyv-js
 │   ├── index.js    measurement harness

@@ -11,6 +11,7 @@ static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 use rkyv::{Archive, Deserialize, Serialize};
 use wasm_zero::wasm_zero;
 
+#[wasm_zero]
 #[derive(Archive, Serialize, Deserialize)]
 pub struct Person {
     pub name: String,

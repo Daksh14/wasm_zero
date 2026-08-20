@@ -62,9 +62,9 @@ export function bindWasmZero(wasm: any) {
 
   return {
     wasm,
-    width(): number { return wasm["__wasm_zero_width"](); },
     height(): number { return wasm["__wasm_zero_height"](); },
     render(mouse_x: number, mouse_y: number, mouse_down: number, orbit_cx: number, orbit_cy: number): Uint8Array { return call("__wasm_zero_render", 8, (dv, u8, p) => rdVec(dv, p, Uint8Array), null, null, [mouse_x, mouse_y, mouse_down, orbit_cx, orbit_cy]); },
+    width(): number { return wasm["__wasm_zero_width"](); },
   };
 }
 

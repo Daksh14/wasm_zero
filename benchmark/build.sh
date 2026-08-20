@@ -17,9 +17,15 @@ wasm-pack build wasm-bindgen \
   --out-dir ../web/pkg/wasm-bindgen \
   --out-name bench_wasm_bindgen
 
-echo ">> building wasm-zero suite (cargo; build.rs emits bindings)"
+echo ">> building wasm-zero suite (cargo, then bindings from the wasm metadata)"
 ( cd wasm-zero && cargo build --release )
-cp target/wasm32-unknown-unknown/release/bench_wasm_zero.wasm web/pkg/wasm-zero/
+
+# Generate bindings from the __wasm_zero custom section of the compiled wasm,
+# then ship a copy with that section stripped (it's build-time-only data).
+( cd .. && cargo run -q -p wasm_zero_build --example generate -- \
+    benchmark/target/wasm32-unknown-unknown/release/bench_wasm_zero.wasm \
+    benchmark/web/pkg/wasm-zero \
+    --strip-to benchmark/web/pkg/wasm-zero/bench_wasm_zero.wasm )
 
 # wasm-opt both outputs (best-effort: an old Binaryen may not validate the
 # LTO'd modules — if so it's skipped for both, keeping the comparison fair).
