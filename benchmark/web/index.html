@@ -24,11 +24,13 @@
     window.Foo = class { bar() {} };
   </script>
 
-  <!-- rkyv-js isn't on npm; build it from GitHub source via esm.sh. -->
+  <!-- Resolve the bare `rkyv-js` specifiers (npm package, served via esm.sh).
+       The prefix entry covers subpath imports like `rkyv-js/encode`. -->
   <script type="importmap">
   {
     "imports": {
-      "rkyv-js": "https://esm.sh/gh/cometkim/rkyv-js@2c3fc14"
+      "rkyv-js": "https://esm.sh/rkyv-js@0.2.1",
+      "rkyv-js/": "https://esm.sh/rkyv-js@0.2.1/"
     }
   }
   </script>

@@ -9,4 +9,4 @@ rkyv.workspace = true
 bytecheck = "0.8.2"
 
 [build-dependencies]
-rkyv-js-codegen = { git = "https://github.com/cometkim/rkyv-js" }
+rkyv-js-codegen = "0.2.1"

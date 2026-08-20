@@ -487,9 +487,12 @@ dependencies = [
 
 [[package]]
 name = "rkyv-js-codegen"
-version = "0.0.1"
-source = "git+https://github.com/cometkim/rkyv-js#2c3fc14860535eb9b8075f1db7547a45dbd8fa6e"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cdbd1432d9f87be505bfaa3cea041083270068caf0508631120e57387164245"
 dependencies = [
+ "proc-macro2",
+ "quote",
  "syn",
  "walkdir",
 ]
