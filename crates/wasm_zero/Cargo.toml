@@ -9,4 +9,4 @@ rkyv.workspace = true
 bytecheck = "0.8.2"
 
 [build-dependencies]
-rkyv-js-codegen = "0.2.1"
+rkyv-js-codegen = "0.3.0"

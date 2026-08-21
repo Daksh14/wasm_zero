@@ -287,7 +287,7 @@ rkyv *writer* is out of scope). The read path never needs it.
      rkyv-js/encode (needs rkyv-js >= 0.2.0 for the external-buffer
      RkyvWriter); add an import map then:
      <script type="importmap">
-       { "imports": { "rkyv-js/": "https://esm.sh/rkyv-js@0.2.0/" } }
+       { "imports": { "rkyv-js/": "https://esm.sh/rkyv-js@0.3.0/" } }
      </script> -->
 ```
 
