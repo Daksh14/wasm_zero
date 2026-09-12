@@ -12,13 +12,19 @@ cd "$(dirname "$0")"
 mkdir -p web/pkg/wasm-bindgen web/pkg/wasm-zero
 
 echo ">> building wasm-bindgen suite (wasm-pack)"
-wasm-pack build wasm-bindgen \
+# RUSTFLAGS (even empty) replaces all config-file rustflags:
+# the repo root .cargo/config.toml sets +atomics,+bulk-memory for the rayon demos,
+# which would inflate this module and skew the size comparison.
+RUSTFLAGS="" wasm-pack build wasm-bindgen \
   --target web --release \
   --out-dir ../web/pkg/wasm-bindgen \
   --out-name bench_wasm_bindgen
 
 echo ">> building wasm-zero suite (cargo, then bindings from the wasm metadata)"
-( cd wasm-zero && cargo build --release )
+# RUSTFLAGS replaces all config-file rustflags: the repo root .cargo/config.toml
+# sets +atomics,+bulk-memory for the rayon demos, which would make this module
+# import a shared memory and break the (non-threaded) generated loader.
+( cd wasm-zero && RUSTFLAGS="-C panic=abort" cargo build --release )
 
 # Generate bindings from the __wasm_zero custom section of the compiled wasm,
 # then ship a copy with that section stripped (it's build-time-only data).

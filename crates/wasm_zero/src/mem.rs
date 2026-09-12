@@ -70,6 +70,15 @@ pub unsafe fn read_buffer<'a>(ptr: *const u8) -> &'a [u8] {
 }
 
 /// Parse the buffer
+///
+/// rkyv reads the archive **in place**, so `bytes` must satisfy
+/// the archived type's alignment.
+///
+/// Buffers from [`read_buffer`] are always 16-aligned,
+/// which covers every rkyv archived type, so the generated bindings unarchive with no copy at all.
+///
+/// Any other caller is made correct by copying into aligned scratch first.
+///
 /// # SAFETY
 /// the pointer
 pub unsafe fn parse_buffer<T>(bytes: &[u8]) -> Result<T, ErrorCode>
@@ -78,6 +87,11 @@ where
     T::Archived: for<'a> CheckBytes<HighValidator<'a, rancor::Error>>
         + Deserialize<T, HighDeserializer<rancor::Error>>,
 {
+    if (bytes.as_ptr() as usize).is_multiple_of(ALIGNMENT) {
+        return rkyv::from_bytes::<T, rancor::Error>(bytes)
+            .or(Err(ErrorCode::UnarchivingError));
+    }
+
     // AlignedVec guarantees 16-byte alignment — enough for all rkyv types
     let mut aligned = AlignedVec::<16>::new();
     aligned.extend_from_slice(bytes);
