@@ -1,7 +1,8 @@
 # wasm_zero
 
-A lightweight WASM FFI binding generator and [rkyv](https://rkyv.org/)
-serialization wrapper between TypeScript and Rust. Built for **`no_std`** wasm
+Zero-deserialization typed data exchange for WebAssembly. 
+
+[rkyv](https://rkyv.org/) serialization wrapper between TypeScript and Rust. Built for **`no_std`** wasm
 targets — no `wasm-bindgen`, no JS glue runtime, no allocator assumptions beyond
 your own.
 
@@ -390,6 +391,99 @@ This is why, in the [benchmark](benchmark), `wasm_zero` matches or beats
 wasm_bindgen on scalar calls and numeric-array returns; for full struct
 materialization with strings, serde-wasm-bindgen's single-pass build is still
 a touch faster, while wasm_zero wins when you read only some fields.
+
+## Roadmap: WASI components
+
+wasm_zero intends to target WASI components, while keeping the `malloc` / `free`
+API available for custom use cases and compatibility with older browsers. The
+goal is for components to follow the same linear-memory principle the core
+module path follows today: the archive is laid out once and read in place.
+
+```
+                    wasm_zero
+                        │
+              Archived Rust types
+                        │
+              generated typed views
+                        │
+       ┌────────────────┴───────────────┐
+       │                                │
+ Core WebAssembly                  Components
+       │                                │
+ direct memory ABI                 WIT / Canonical ABI
+       │                                │
+ zero-copy guest view              archive as list<u8>
+       │                                │
+ browser/exu                       wstd/Wasmtime/jco/etc
+```
+
+### `cabi_realloc` and why it gets in the way
+
+In the [Canonical ABI](https://github.com/WebAssembly/component-model/blob/main/design/mvp/CanonicalABI.md),
+a component exports an allocator, usually named `cabi_realloc`:
+
+```wat
+(func (export "cabi_realloc")
+  (param $old_ptr i32) (param $old_size i32) (param $align i32) (param $new_size i32)
+  (result i32))
+```
+
+When a value with a dynamic size (a `list` or `string`, or more parameters or
+results than fit in flat core values) has to be *lowered* into a component's
+linear memory, the host or adapter calls `cabi_realloc(0, 0, align, size)`.
+It copies the bytes to the returned pointer, then hands the guest a
+`(ptr, len)` pair. The adapter controls the allocation, not the guest:
+
+- The guest can't choose where the bytes land or when they're copied, and it
+  can't skip values it never reads. Everything is allocated and copied before
+  guest code runs.
+- Nested values (`list<list<u8>>`, records of strings, …) call `cabi_realloc`
+  once per element, so the guest can't batch allocations or place values
+  side by side.
+- For wasm_zero, an archive passed as `list<u8>` lands in a buffer that
+  `cabi_realloc` picked. The guest can't ask for it to be placed in an arena,
+  in a pre-sized `[len][bytes]` frame, or next to related data.
+
+### Lazy lowering ([component-model#383](https://github.com/WebAssembly/component-model/issues/383))
+
+[WebAssembly/component-model#383](https://github.com/WebAssembly/component-model/issues/383)
+("Lazy value lowering", still an open proposal) reverses this control flow.
+Instead of calling `realloc` and storing a pointer, the Canonical ABI would
+store an `i32` *value index* for each value that still needs lowering,
+together with its length, which is lowered eagerly. Guest code then runs,
+looks at the lengths, allocates memory however it wants, and pulls each value
+into place with a new built-in:
+
+```
+canon value.lower $t: [validx:i32 dstp:i32] -> []
+```
+
+Under this proposal:
+
+- Values that are never lowered are dropped at the end of the call, so data
+  the guest doesn't need costs nothing.
+- Allocations can be batched, and one value can be read into several
+  segments, like `readv()`.
+- A component that only wraps another can forward a value by its index
+  without lowering it at all.
+- Components opt in through a `lazy` `canonopt`, so existing Preview 2
+  binaries keep working.
+
+### What wasm_zero will do with it
+
+After lazy `cabi_realloc` lands, wasm_zero intends to:
+
+1. Generate WIT definitions, or a superset of WIT, for the types and functions
+   you annotate with `#[wasm_zero]`.
+2. Make the generated WIT exports use lazy lowering. The guest reads the
+   archive's length, allocates the frame itself (16-byte aligned, from its own
+   allocator or arena), and calls `value.lower` straight into that frame. The
+   generated typed views then read the archive in place.
+
+The bytes still have to cross from one linear memory to the other, but that
+single copy goes directly into the final, correctly aligned location, and no
+deserialization follows. This is the component-side equivalent of the
+zero-copy guest view that the core module ABI gives today.
 
 ## Limitations
 
