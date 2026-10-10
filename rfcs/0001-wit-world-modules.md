@@ -1,4 +1,4 @@
-# RFC 0001: `#[wasm_zero] mod` for components and WASI
+# RFC 0001: `#[wasm_zero(component)] mod` for components and WASI
 
 - Status: Draft
 - Created: 2026-10-10
@@ -6,8 +6,14 @@
 
 ## Summary
 
-Allow `#[wasm_zero]` on an inline `mod` that implements component exports and
-calls component imports. Inside that module, `#[wasm_zero]` marks the items
+Add a second ABI to wasm_zero, the component model's **canonical ABI**, next
+to today's **core ABI** (`malloc`/`free` + `[len][archive]` frames). Every
+item uses exactly one of the two, and you can tell which from the source:
+anything inside a `#[wasm_zero(component)] mod` uses the canonical ABI,
+and everything else uses the core ABI, exactly as today (see "Two ABIs"
+below).
+
+Inside a `#[wasm_zero(component)]` module, `#[wasm_zero]` marks the items
 that cross the component boundary:
 
 - a `#[wasm_zero] fn` **with a body** is an **export**, and
@@ -46,7 +52,7 @@ world host {
 ```rust
 use wasm_zero::wasm_zero;
 
-#[wasm_zero]
+#[wasm_zero(component)]
 mod host {
     #[wasm_zero]
     fn print(msg: &str); // import: no body
@@ -64,7 +70,7 @@ mod host {
 The same mechanism with an HTTP handler from the `wasip3` crate:
 
 ```rust
-#[wasm_zero(export = wasip3::exports::http::handler, via = wasip3::http::service::export)]
+#[wasm_zero(component, export = wasip3::exports::http::handler, via = wasip3::http::service::export)]
 mod handler {
     use wasip3::http::types::{ErrorCode, Request, Response};
 
@@ -110,6 +116,103 @@ ceremony, and stays out of the types. The WASI ecosystem already maintains
 bindings crates, and wasm_zero shouldn't compete with them or need an update
 every time a proposal changes.
 
+## Two ABIs
+
+wasm_zero has two ABIs. This section is normative. Everything later in this
+RFC is about the canonical ABI, unless it says otherwise.
+
+### Which ABI an item uses
+
+The ABI is decided by **where the item is written**. It never depends on the
+compilation target or on the item's types:
+
+| Where the `#[wasm_zero]` item is                         | ABI                         |
+| -------------------------------------------------------- | --------------------------- |
+| a `fn` that is **not** inside a `#[wasm_zero(component)] mod` | **core ABI** (today's behaviour, unchanged) |
+| anything inside a `#[wasm_zero(component …)] mod`, at any nesting depth | **canonical ABI** |
+| a `struct` (`#[wasm_zero] #[derive(Archive)]`)           | neither: it is data. It gets a reader and can be used by both ABIs |
+
+Rules:
+
+1. **The boundary is explicit.** A bare `#[wasm_zero]` on a `mod` is a
+   `compile_error!` ("say `#[wasm_zero(component)]`"). The keyword is only
+   needed on the outermost module. Nested modules (`import = …`,
+   `export = …`) inherit it.
+2. **One item, one ABI.** Inside a component module, `#[wasm_zero]` can't ask
+   for the core ABI, and `#[wasm_zero(core)]` there is an error. To expose
+   the same logic both ways, write it once as a plain function and call it
+   from two annotated wrappers (see "Exposing one function through both ABIs").
+3. **No automatic bridging.** A core-ABI shim never becomes a component
+   export, and a component export never gets a `__wasm_zero_*` shim.
+   Putting an existing core module inside a component is a separate,
+   explicit build step (see "Open questions").
+
+### What each ABI means
+
+|                       | Core ABI                                                      | Canonical ABI                                                |
+| --------------------- | ------------------------------------------------------------- | ------------------------------------------------------------ |
+| Declared by           | `#[wasm_zero] fn` outside component modules                   | items inside `#[wasm_zero(component …)] mod`                 |
+| Artifact              | core wasm module                                              | component (built as `wasm32-wasip2`)                         |
+| Typical host          | browser / exu / Node, through the generated `bindings.js`     | Wasmtime, Spin, jco, `wasmtime serve`, …                     |
+| Exported symbols      | `__wasm_zero_<fn>` + the allocator (`malloc`/`free`)          | WIT names, lifted by `canon lift`. wit-bindgen supplies `cabi_realloc` |
+| Imports               | none                                                          | WIT imports (own world, or bindings crates)                  |
+| Scalars               | direct wasm params and returns                                | direct (canonical flattening)                                |
+| Non-scalar values     | **always** rkyv: `[len: u32][pad to 16][archive]` in guest memory | whatever the WIT type maps to (pass-through). rkyv **only** with `#[archive]` / `#[wasm_zero(archive)]` |
+| Who allocates         | the host calls the guest's `malloc`. Results go into a frame at `out_ptr` | the canonical ABI: the host calls `cabi_realloc` for args, and the guest returns pointers for results |
+| Allowed types         | scalars, or owned rkyv-archivable types                       | anything the `Guest` trait signature accepts                 |
+| Errors                | `ErrorCode` return value                                      | whatever the WIT says (`result<…>`). An invalid archive traps unless taken as `Result<Archived<T>, _>` |
+| How the host reads results | in place, in guest memory (0 copies)                     | the host copies the value out (1 copy), then reads the archive in place |
+| Bindings              | `wasm_zero_build` → `bindings.{js,ts}`                        | the host's component bindings, plus `wasm_zero_build` typed views for `#[archive]` values |
+
+**The archive bytes are identical in both ABIs. Only the framing differs.**
+With the core ABI, the archive sits in guest memory behind a 16-byte header
+that holds the length. With the canonical ABI, an archive is a `list<u8>`, the
+length travels in the canonical `(ptr, len)` pair, and there is no header.
+So the generated `decode_Person` reads either: from a frame in wasm memory,
+or from the `Uint8Array` a component host returns.
+
+### Exposing one function through both ABIs
+
+```rust
+#[wasm_zero]
+#[derive(rkyv::Archive, rkyv::Serialize)]
+pub struct Person { name: String, age: u32 }
+
+fn load_person() -> Person { /* … */ } // plain Rust, used by both ABIs
+
+#[wasm_zero]                           // core ABI: __wasm_zero_get_person(out_ptr)
+pub fn get_person() -> Person {
+    load_person()
+}
+
+#[wasm_zero(component)]                // canonical ABI: export get-person: func() -> list<u8>
+mod api {
+    #[wasm_zero(archive)]
+    pub fn get_person() -> super::Person {
+        super::load_person()
+    }
+}
+```
+
+Build it as a core module (`wasm32-unknown-unknown`) for the browser and as a
+component (`wasm32-wasip2`) for component hosts. Each build emits both kinds
+of items, so gate the side you don't need:
+
+- **Core-ABI items in a component build** are dead weight. wit-component
+  ignores core exports that aren't part of the world (it logs "unknown
+  export"), so they are never reachable. Gate them with
+  `#[cfg(not(target_env = "p2"))]`.
+- **The core ABI's allocator on WASI targets.** On `target_os = "wasi"`, Rust's
+  std links wasi-libc, which already defines `malloc` and `free`. There, the
+  core ABI exports its allocator as `__wasm_zero_malloc` /
+  `__wasm_zero_free` instead. It records the names in the `__wasm_zero`
+  metadata section, so the generated bindings use whichever names the module
+  has. On other targets the names stay `malloc` / `free`, so nothing changes
+  for existing users.
+- **Component modules in a core build** need wit-bindgen and WIT imports
+  that a browser can't provide. Gate them with
+  `#[cfg(target_env = "p2")]` (or `"p3"` once that target exists).
+
 ## Guide-level explanation
 
 ### Forward, don't interpret
@@ -149,19 +252,21 @@ the forwarder exactly as they do in your function.
 ### The world module
 
 ```rust
+    component,                      // required: this module and everything in it use the canonical ABI
 #[wasm_zero(
     world = "host",                 // own WIT world. Default: the module ident, kebab-cased
     path = "wit",                   // default: "wit" (relative to CARGO_MANIFEST_DIR)
     with("wasi:http/types@0.3.0" = wasip3::http::types), // passed to wit-bindgen verbatim
     runtime = wasip3::wit_bindgen,  // which wit-bindgen runtime the generated code uses
     extends(super::base),           // optional, see "Extending worlds"
-    component = true,               // default: true. Whether this module is the component root (emits `export!`)
+    root = true,                    // default: true. Whether this module emits the export macro call
 )]
 mod host { /* … */ }
 ```
 
-When no arguments are given, `#[wasm_zero] mod host {}` resolves to world
-`host` in `./wit`. A module that only uses a bindings crate (`export = path`,
+`component` is required: it is what selects the canonical ABI (see "Two
+ABIs"). With no other arguments, `#[wasm_zero(component)] mod host {}`
+resolves to world `host` in `./wit`. A module that only uses a bindings crate (`export = path`,
 see below) doesn't need a world or a `wit/` directory.
 
 An outer attribute on an inline `mod` (`mod host { … }`) is stable Rust. An
@@ -172,8 +277,9 @@ files; see "Delegating to other paths".
 The outer attribute expands **first** and receives the module's tokens
 unexpanded, including the inner `#[wasm_zero]` attributes. It interprets those
 inner attributes and removes them, so they never expand separately. The macro
-recognizes any attribute path whose last segment is `wasm_zero`. Outside a
-world module, `#[wasm_zero]` keeps its current meaning: a core-module FFI shim.
+recognizes any attribute path whose last segment is `wasm_zero`. A
+`#[wasm_zero] fn` *outside* any component module is never seen by this
+macro. It expands on its own into a core-ABI shim, as it does today.
 
 ### Exports
 
@@ -243,7 +349,7 @@ Imports that a crate already provides need no macro support. They are just
 Rust:
 
 ```rust
-#[wasm_zero]
+#[wasm_zero(component)]
 mod app {
     use wasip3::clocks::monotonic_clock;
     use wasip3::random::random::get_random_u64;
@@ -275,7 +381,7 @@ would generate for an own world. (The `wasip3` export macros take a plain
 identifier, which is why the component struct is always a local ident.)
 
 ```rust
-#[wasm_zero(export = wasip3::exports::cli::run, via = wasip3::cli::command::export)]
+#[wasm_zero(component, export = wasip3::exports::cli::run, via = wasip3::cli::command::export)]
 mod cli {
     #[wasm_zero]
     pub async fn run() -> Result<(), ()> {
@@ -388,7 +494,7 @@ world host {
 ```
 
 ```rust
-#[wasm_zero]
+#[wasm_zero(component)]
 mod host {
     #[wasm_zero(export = "example:host/greeter")]
     pub mod greeter {
@@ -477,7 +583,7 @@ You can implement every export in place, or reuse an existing world module
 with `extends`:
 
 ```rust
-#[wasm_zero(component = false)] // a library piece: doesn't emit `export!`
+#[wasm_zero(component, root = false)] // a library piece: doesn't emit `export!`
 mod host {
     #[wasm_zero]
     fn print(msg: &str);
@@ -488,7 +594,7 @@ mod host {
     }
 }
 
-#[wasm_zero(extends(super::host))]
+#[wasm_zero(component, extends(super::host))]
 mod app {
     #[wasm_zero]
     pub fn greet(name: String) -> String {
@@ -511,11 +617,11 @@ applies to `pub use` exports (below). Both are limited to own worlds.
 ```rust
 const _: () = assert!(
     !super::host::__WASM_ZERO_EXPORTS,
-    "`super::host` is used in `extends(..)`; mark it `#[wasm_zero(component = false)]`",
+    "`super::host` is used in `extends(..)`; mark it `#[wasm_zero(component, root = false)]`",
 );
 ```
 
-This turns a missing `component = false` into a clear compile error instead
+This turns a missing `root = false` into a clear compile error instead
 of a duplicate-symbol error from the linker.
 
 ### Delegating to other paths
@@ -523,7 +629,7 @@ of a duplicate-symbol error from the linker.
 ```rust
 mod impls; // regular out-of-line module
 
-#[wasm_zero]
+#[wasm_zero(component)]
 mod host {
     #[wasm_zero]
     pub use super::impls::run; // satisfies `export run`
@@ -535,6 +641,9 @@ For an own world, the forwarder's signature is derived from the WIT, as for
 `compile_error!` there. The error asks for a one-line wrapper `fn` instead.
 
 ### Archived payloads (explicit opt-in)
+
+This section is about the canonical ABI only. With the core ABI, every
+non-scalar value is already an archive and no opt-in exists.
 
 A WIT `list<u8>` can carry an rkyv archive. Following the rule above, wasm_zero
 doesn't convert to or from a `list<u8>` because it *sees* a struct type. You
@@ -551,7 +660,7 @@ pub struct Person {
     age: u32,
 }
 
-#[wasm_zero]
+#[wasm_zero(component)]
 mod people {
     use super::Person;
     use wasm_zero::Archived;
@@ -659,7 +768,7 @@ result<response, error-code>`, and request and response bodies are
 component-model `stream<u8>`s instead of `wasi:io` resources:
 
 ```rust
-#[wasm_zero(export = wasip3::exports::http::handler, via = wasip3::http::service::export)]
+#[wasm_zero(component, export = wasip3::exports::http::handler, via = wasip3::http::service::export)]
 mod handler {
     use super::Person;
     use wasip3::http::types::{ErrorCode, Fields, Request, Response};
@@ -694,7 +803,7 @@ already exports it, and if your world exported it as well, `wit::export!`
 would also require an implementation of `wit::exports::wasi::http::handler`.
 
 ```rust
-#[wasm_zero(world = "api", runtime = wasip3::wit_bindgen)] // world api { import example:api/audit; }
+#[wasm_zero(component, world = "api", runtime = wasip3::wit_bindgen)] // world api { import example:api/audit; }
 mod api {
     #[wasm_zero(import = "example:api/audit")]
     mod audit {
@@ -759,7 +868,7 @@ world classifier {
 ```
 
 ```rust
-#[wasm_zero(world = "classifier")]
+#[wasm_zero(component, world = "classifier")]
 mod classifier {
     use super::Image; // #[wasm_zero] #[derive(Archive)] struct Image { pixels: Vec<u8>, .. }
     use self::wit::wasi::nn::{graph, tensor::{Tensor, TensorType}};
@@ -801,7 +910,7 @@ one fits) and include it in your world. Exports that drive it are simply
 `async`:
 
 ```rust
-#[wasm_zero(world = "renderer", runtime = wasip3::wit_bindgen)]
+#[wasm_zero(component, world = "renderer", runtime = wasip3::wit_bindgen)]
 // world renderer { import wasi:webgpu/webgpu@0.3.0-rc.2; export draw: async func(mesh: list<u8>); }
 mod renderer {
     use super::Mesh; // #[wasm_zero] #[derive(Archive)] struct Mesh { vertices: Vec<f32>, .. }
@@ -839,7 +948,7 @@ exported `watcher` (`on-set`/`on-delete`) in world `watch-service`. Those
 opaque bytes are a good fit for archives, but storing them remains your code:
 
 ```rust
-#[wasm_zero(world = "indexer")] // world indexer { include wasi:keyvalue/watch-service@0.2.0-draft2; }
+#[wasm_zero(component, world = "indexer")] // world indexer { include wasi:keyvalue/watch-service@0.2.0-draft2; }
 mod indexer {
     use super::Person;
     use self::wit::wasi::keyvalue::store::{self, Bucket};
@@ -896,8 +1005,9 @@ update in your project and nothing in wasm_zero.
 
 ### Macro pipeline
 
-1. Parse `attr` into `{ world?, path, with: TokenStream, runtime: Path?,
-   extends: Vec<Path>, component: bool, export?: (Lit | Path), via?: Path }`.
+1. Parse `attr`. Without `component`, emit the "say `#[wasm_zero(component)]`"
+   error. Otherwise parse `{ world?, path, with: TokenStream, runtime: Path?,
+   extends: Vec<Path>, root: bool, export?: (Lit | Path), via?: Path }`.
 2. If there is a `world`, resolve `path` against `CARGO_MANIFEST_DIR`, load
    it with `wit-parser` (to get names, the `include` structure, and the
    signatures for `extends` / `pub use` forwarding), and emit
@@ -932,8 +1042,12 @@ works without `std`.
 - A bodyless `fn` is unusual Rust. It is legal macro input, but
   rust-analyzer may show a "missing body" diagnostic until it expands the
   macro.
-- `#[wasm_zero]` means different things depending on context. The direction
-  table above is the complete rule set.
+- The same `#[wasm_zero] fn` text means a different ABI depending on whether it
+  is inside a `#[wasm_zero(component)]` module. The required `component`
+  keyword on the boundary and the "Two ABIs" rules keep this visible, but a
+  function moved into or out of a component module silently changes ABI.
+  rustc usually catches this, because the core ABI requires rkyv types and the
+  canonical ABI requires the trait's types.
 - Each own world, and each bindings crate, contributes its own
   `component-type` section, and `wit-component` merges them. That is how
   `wasip3` + `generate!` crates already work, but a world that combines
@@ -974,6 +1088,15 @@ works without `std`.
    bindings crates that names its export macro would need upstream support.
 4. Should name-level WIT checks (missing or misspelled exports in own worlds)
    come before or after the first implementation?
-5. Should a local `#[wasm_zero] fn` be allowed to override an
+5. **Bringing a prebuilt core module into a component.** A
+   `wasm_zero_build componentize app.wasm` step could read the `__wasm_zero`
+   section and generate WIT plus a small adapter core module. The result is
+   one component containing two core modules: the unchanged wasm_zero
+   module, which owns the memory and allocator, and the adapter, which
+   imports them. Scalar shims could be lifted directly. Buffer shims would go
+   through the adapter, with `cabi_realloc` over `malloc` aligned to 16 bytes,
+   and a post-return `free`. This is a build-tool feature, so it doesn't
+   affect rule 3 of "Two ABIs". Should it be RFC 0002?
+6. Should a local `#[wasm_zero] fn` be allowed to override an
    `extends`-delegated export silently, or should it require
    `#[wasm_zero(override)]`?
